@@ -14,6 +14,45 @@ export type SessionMessage = {
   parts?: Array<{ type?: string; text?: string }>
 }
 
+export type TeamAgent = {
+  id: string
+  mode: "primary" | "subagent" | "all"
+  hidden?: boolean
+}
+
+export type TeamRosterEntry = { name: string; agent: string }
+export type TeamDomain = { name: string; lead: string; members: string[] }
+
+export function validateTeamRoster(
+  lead: string,
+  roster: TeamRosterEntry[],
+  domains: TeamDomain[],
+  available: TeamAgent[],
+) {
+  const names = new Set<string>()
+  for (const member of roster) {
+    const name = member.name.trim()
+    if (!name || names.has(name.toLowerCase())) {
+      throw new Error(`Missing or duplicate participant name: "${member.name}"`)
+    }
+    names.add(name.toLowerCase())
+    if (!available.some((agent) => agent.id === member.agent &&
+      (agent.mode === "subagent" || agent.mode === "all") && agent.hidden === false)) {
+      throw new Error(`Participant role "${member.agent}" is no longer available`)
+    }
+  }
+  if (!available.some((agent) => agent.id === lead &&
+    (agent.mode === "primary" || agent.mode === "all") && agent.hidden === false)) {
+    throw new Error(`Team Lead role "${lead}" is no longer available`)
+  }
+  for (const domain of domains) {
+    if (!domain.name.trim() || !names.has(domain.lead.trim().toLowerCase()) ||
+      domain.members.some((name) => !names.has(name.trim().toLowerCase()))) {
+      throw new Error(`Invalid domain assignment for "${domain.name}"`)
+    }
+  }
+}
+
 export function pageSessions<T>(page: { sessions?: T[]; data?: T[] }): T[] {
   return page.sessions ?? page.data ?? []
 }

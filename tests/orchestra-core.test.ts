@@ -6,6 +6,7 @@ import {
   resolveChild,
   sessionStatus,
   summarizeMessages,
+  validateTeamRoster,
 } from "../src/core"
 
 describe("Orchestra child session lookup", () => {
@@ -61,5 +62,39 @@ describe("Orchestra child session lookup", () => {
     expect(agentLabel("Developer")).toBe("🛠 **Developer**")
     expect(agentLabel("Reviewer")).toBe("🔎 **Reviewer**")
     expect(agentLabel(undefined)).toBe("🤖 **Agent**")
+  })
+})
+
+describe("Orchestra team roster validation", () => {
+  const agents = [
+    { id: "lead", mode: "primary" as const, hidden: false },
+    { id: "dev", mode: "subagent" as const, hidden: false },
+    { id: "both", mode: "all" as const, hidden: false },
+    { id: "hidden", mode: "subagent" as const, hidden: true },
+  ]
+
+  test("accepts a solo Team Lead and compatible participant roles", () => {
+    expect(() => validateTeamRoster("lead", [], [], agents)).not.toThrow()
+    expect(() => validateTeamRoster("lead", [
+      { name: "Dev", agent: "dev" },
+      { name: "QA", agent: "dev" },
+    ], [{ name: "Quality", lead: "QA", members: ["Dev", "QA"] }], agents))
+      .not.toThrow()
+  })
+
+  test("rejects duplicate names, hidden roles, and incompatible leads", () => {
+    expect(() => validateTeamRoster("lead", [
+      { name: "Dev", agent: "dev" },
+      { name: " dev ", agent: "dev" },
+    ], [], agents)).toThrow("duplicate participant name")
+    expect(() => validateTeamRoster("lead", [{ name: "Dev", agent: "hidden" }], [], agents))
+      .toThrow("no longer available")
+    expect(() => validateTeamRoster("dev", [], [], agents)).toThrow("Team Lead role")
+  })
+
+  test("rejects domain leads or members outside the roster", () => {
+    expect(() => validateTeamRoster("lead", [{ name: "Dev", agent: "dev" }], [
+      { name: "Build", lead: "lead", members: ["Dev"] },
+    ], agents)).toThrow("Invalid domain assignment")
   })
 })
