@@ -1,15 +1,16 @@
-# 0001-draft-team-onboarding
+# 0001-approved-team-onboarding
 
-- Status: Approved
+- Status: Done
 - Owner: TBD
 - Created: 2026-11-10
 - Related issues: none
 
 ## Steps
 
-- [x] Finalize the team structure and role-assignment rules.
-- [x] Define the onboarding questions, validation, and setup flow.
-- [x] Review scope and acceptance criteria before implementation.
+- [x] Implement the `/team setup` onboarding command and validated roster flow.
+- [x] Implement team activation, replacement, rollback, and completion.
+- [x] Add scripted smoke tests for success and failure scenarios.
+- [x] Update usage documentation and close the plan after validation.
 
 ## Problem statement
 
@@ -27,8 +28,8 @@ ambiguous.
 - A team has exactly one Team Lead, operating in the main session.
 - Every agent has exactly one functional role; multiple agents may share a role.
 - The role catalog includes all OpenCode agent definitions available to the
-  project (project-local, global, and built-in), with each definition's source
-  shown to the user.
+  project (project-local, global, and built-in), with each definition's short
+  description and source shown when available.
 - Team Lead role choices must be visible and usable in the main session
   (`primary` or `all`); participant role choices must be visible and usable in
   child sessions (`subagent` or `all`). Both lists exclude hidden definitions.
@@ -60,10 +61,11 @@ ambiguous.
   Lead definition last.
 - If a Team is already active, replacing it requires confirmation. The old Team
   remains active until the new Team has been created successfully.
-- On activation, the main session stores the original agent and active roster
-  in metadata, preserving unrelated metadata. On completion, the user confirms
-  in chat; onboarding restores the original agent and clears only its own
-  active-roster metadata.
+- OpenCode 2.2.6 does not support updating session metadata through the plugin
+  API. Orchestra stores the original agent and active roster in a private,
+  session-keyed JSON file under `.opencode/orchestra/teams/`; it does not modify
+  unrelated session metadata. On completion, the user confirms in chat,
+  onboarding restores the original agent, then removes only that team's file.
 - Completed child sessions remain available as history and are not reused by a
   later Team.
 - If no compatible role definition is available, onboarding stops and explains
@@ -77,12 +79,12 @@ ambiguous.
   the user must correct them before seeing the final summary. Any roster change
   after the summary requires approval of the updated summary.
 - If switching the main session to the new Team Lead or saving the new Team
-  metadata fails, onboarding removes the new child sessions and leaves the main
-  session and previous Team unchanged. Failed removals are reported by session
-  ID.
+  state file fails, onboarding removes the new child sessions and leaves the
+  main session and previous Team unchanged. Failed removals are reported by
+  session ID.
 - When closing a Team, the original agent is restored before Orchestra's active
-  roster metadata is removed. If either operation fails, the remaining Team
-  metadata is kept and the failure is reported so closure can be retried.
+  roster file is removed. If either operation fails, the state file is kept and
+  the failure is reported so closure can be retried.
 
 ## Options considered
 
@@ -105,8 +107,8 @@ domain-level coordination in one agent and makes domain grouping less useful.
   user confirmation.
 - Let the user define the team roster, functional roles, optional Domain Leads,
   and their domains' members.
-- List available OpenCode agent definitions, show their source, and allow
-  multiple roster entries to use the same definition.
+- List available OpenCode agent definitions with short descriptions and source
+  when available, and allow multiple roster entries to use the same definition.
 - Recheck the selected role definitions before activation; if any are no longer
   available or compatible, explain the issue and let the user correct the
   roster without changing sessions.
@@ -130,6 +132,14 @@ domain-level coordination in one agent and makes domain grouping less useful.
 - Switching the current main session or creating child sessions may fail after
   some setup has already succeeded.
 
+## Implementation note
+
+The current plugin API cannot write session metadata. Team state therefore
+lives in `.opencode/orchestra/teams/<session-id>.json`; this is local runtime
+state, not a reusable team definition. The shared command source is
+`src/commands/team.md`; README documents copying it into project or global
+OpenCode command directories. Runtime state remains ignored.
+
 ## Validation approach
 
 The required smoke suite has four scripted groups. It uses predefined user
@@ -141,13 +151,13 @@ credentials, or model calls.
 3. A Team with repeated roles and a user-selected Domain Lead, including the
    domain's member list.
 4. Safety checks for cancellation, child-session creation failure, failed
-   rollback, failed Team Lead switch or metadata save, failed closure, and
+    rollback, failed Team Lead switch or state save, failed closure, and
    replacement of an active Team.
 
 The first three groups exercise setup, approval, activation, completion, and
 restoration of the original agent. Assertions cover role-mode and hidden-agent
 filters, unchanged main-session ID, child creation before switching the main
-agent, preservation of unrelated metadata, and retention of child-session
+agent, preservation of unrelated session metadata, and retention of child-session
 history. Safety checks verify that cancellation has no effects, failed setup
 does not replace the active Team, and incomplete rollback or closure is reported
 without discarding the state needed for recovery.
