@@ -41,6 +41,19 @@ type SessionAPI = {
   prompt(input: { sessionID: string; text: string }): Promise<unknown>
   context(input: { sessionID: string }): Promise<SessionMessage[]>
   remove(input: { sessionID: string }): Promise<void>
+  switchAgent(input: { sessionID: string; agent: string }): Promise<void>
+}
+
+type AgentInfo = {
+  id: string
+  name: string
+  description?: string
+  mode: "primary" | "subagent" | "all"
+  hidden?: boolean
+}
+
+type AgentAPI = {
+  list(): Promise<{ data: AgentInfo[] }>
 }
 
 async function listChildren(
@@ -73,12 +86,85 @@ export default Plugin.define({
   async setup(ctx) {
     // shortcut: plugin types omit API fields; remove this cast when they expose them.
     const session = ctx.session as unknown as SessionAPI
+    const agents = (ctx as unknown as { agent: AgentAPI }).agent
     const directory = ctx.location.directory
 
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "orchestra",
-        description: "Create and manage child-agent sessions",
+        description: "Manage agents and child-agent sessions",
+      })
+
+      editor.add({
+        name: "switch_agent",
+        description: "Switch the agent used by this session for subsequent requests.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: { agent: { type: "string", minLength: 1 } },
+          required: ["agent"],
+          additionalProperties: false,
+        },
+        execute: async (raw, toolContext) => {
+          const input = raw as { agent: string }
+          await session.switchAgent({
+            sessionID: toolContext.sessionID,
+            agent: input.agent,
+          })
+          return result(`Switched this session to the ${input.agent} agent.`)
+        },
+      })
+
+      editor.add({
+        name: "list_agent",
+        description: "List visible agent definitions usable in child sessions.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        execute: async () => {
+          const listed = await agents.list()
+          const available = listed.data.filter(
+            (agent) =>
+              (agent.mode === "subagent" || agent.mode === "all") &&
+              agent.hidden === false,
+          )
+          return result(JSON.stringify(available.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            description: agent.description,
+            mode: agent.mode,
+            hidden: agent.hidden,
+          }))))
+        },
+      })
+
+      editor.add({
+        name: "list_lead",
+        description: "List visible agent definitions usable in the main session.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        execute: async () => {
+          const listed = await agents.list()
+          const available = listed.data.filter(
+            (agent) =>
+              (agent.mode === "primary" || agent.mode === "all") &&
+              agent.hidden === false,
+          )
+          return result(JSON.stringify(available.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            description: agent.description,
+            mode: agent.mode,
+            hidden: agent.hidden,
+          }))))
+        },
       })
 
       editor.add({
