@@ -1,0 +1,201 @@
+specification: Agent Team Invariants
+version: '1.0'
+sections:
+  structural:
+  - id: INV-S01
+    name: Single root
+    rule: Each run MUST have exactly one active Team Lead. The Team Lead's
+      session MUST equal `teamRun.rootSessionId` and MUST NOT have a parent;
+      every other active member MUST have exactly one existing active parent
+      within that run.
+    check: '`count(roots(activeMembers(run))) == 1` and
+      `root.id == teamRun.leadMemberId` and
+      `session(teamRun.leadMemberId).id == teamRun.rootSessionId`.'
+    violation: Reject member creation, reparenting, archiving, or run update.
+  - id: INV-S02
+    name: Acyclic member hierarchy
+    rule: The active parent-child hierarchy MUST be acyclic, and every active
+      member MUST be connected to the Team Lead through its parent chain. A
+      member MUST NOT be its own ancestor.
+    check: Following parent links from any active member terminates at the Team
+      Lead without repeated IDs.
+    violation: Reject the proposed change.
+  - id: INV-S03
+    name: One member, one session per run
+    rule: Each member MUST reference exactly one session, and each session MUST
+      belong to exactly one member within a run. Session IDs MUST NOT be reused
+      by different members.
+    check: The `member.sessionId ↔ session.memberId` mapping is bijective
+      across run members and sessions.
+    violation: Reject creation or reassociation.
+  - id: INV-S04
+    name: Session and member hierarchy agree
+    rule: An active child member's `session.parentSessionId` MUST equal its
+      active parent member's `sessionId`; the Team Lead's session MUST NOT have
+      a parent session.
+    check: '`session(m).parentSessionId == session(parent(m)).id` for active
+      non-root members.'
+    violation: Reject inconsistent session creation or reparenting.
+  - id: INV-S05
+    name: Cross-run isolation
+    rule: An entity MUST NOT reference a member, session, domain, workstream,
+      task, execution, or message from another run.
+    check: Every resolved reference belongs to the same `runId`.
+    violation: Reject the operation.
+  - id: INV-S06
+    name: Domain membership is exclusive
+    rule: An active member MUST belong to **at most one** domain in a run. The
+      Domain Lead MUST be an active member of the domain they lead, and every
+      domain MUST have exactly one active Domain Lead. A Domain Lead MUST NOT
+      leave the domain or be removed while that domain exists.
+    check: Each active member appears in at most one domain's `memberIds`, and
+      each domain's `leadMemberId` appears in that domain's `memberIds` and
+      resolves to an active member.
+    violation: Reject conflicting membership or leadership assignments, and
+      reject removing or moving a Domain Lead while their domain exists.
+  - id: INV-S07
+    name: Domains and workstreams are independent
+    rule: Belonging to different domains MUST NOT, by itself, prevent members
+      from working in the same workstream. A workstream MAY include tasks
+      assigned to members from different domains.
+    check: A workstream may contain tasks whose assignees belong to different
+      domains; authorization does not reject that combination solely because of
+      domain membership.
+    violation: Reject a policy or operation that blocks workstream participation
+      solely because of different domain membership.
+  - id: INV-S08
+    name: Single task assignee
+    rule: A task MUST have at most one current assignee. An unassigned task is
+      allowed. Reassignment MUST replace the assignee atomically rather than
+      add another one.
+    check: '`assigneeMemberId` is null or a single active member ID.'
+    violation: Reject conflicting assignments.
+  - id: INV-S09
+    name: Single active execution per task and member
+    rule: A task MUST NOT have more than one active execution at the same time.
+      A member MUST NOT have more than one active execution at the same time.
+    check: An execution is active when `status == "started"` and `endedAt` is
+      absent. For each task and member, at most one execution may be active,
+      enforced atomically.
+    violation: Reject the second start attempt and report the conflict.
+  - id: INV-S10
+    name: Acyclic task dependencies
+    rule: A task MUST NOT depend on itself, directly or indirectly. All
+      dependency endpoints MUST resolve to tasks in the same run.
+    check: The directed dependency graph is acyclic and contains no self-loops.
+    violation: Reject the new dependency.
+  - id: INV-S11
+    name: Execution provenance
+    rule: Every execution MUST reference exactly one existing task, one member,
+      and that member's session, all in the same run.
+    check: '`execution.sessionId == member(execution.memberId).sessionId`.'
+    violation: Reject the execution record.
+  - id: INV-S12
+    name: Immutable attempt history
+    rule: A retry MUST create a **new** execution ID; prior execution records
+      and their terminal results MUST remain available. An execution MUST NOT
+      be overwritten to represent a new attempt.
+    check: Distinct execution IDs; attempts for the same task are ordered by
+      `startedAt`.
+    violation: Reject overwrite/reuse; create a new record instead.
+  - id: INV-S13
+    name: Archive members and preserve history
+    rule: Archiving a member MUST preserve its member and session records in
+      storage for historical references, and MUST delete its OpenCode session.
+      An archived member MUST NOT have active children, be a Domain Lead, belong
+      to a domain, remain assigned to a task, or have an active execution.
+      Active children MUST first be reparented or archived; domain leadership
+      MUST be transferred; task assignments MUST be reassigned or cleared;
+      active executions MUST be stopped. A run's Team Lead MUST NOT be archived.
+      Archived members MUST NOT receive assignments or start executions.
+    check: The member is marked archived; its OpenCode session is deleted while
+      its stored session reference is retained; all active relationships are
+      cleared or replaced and the active hierarchy remains valid.
+    violation: Reject archiving if the OpenCode session cannot be deleted or if
+      it would violate any structural or reference invariant.
+  behavioral_authorization:
+  - id: INV-B01
+    name: Member creation by the user
+    rule: Only the user MAY create team members, through onboarding or, when
+      supported, an explicit team update. No team member, including the Team
+      Lead, MAY create another member or its session.
+    check: The creation is initiated by the user through onboarding or a
+      supported team update, and the resulting hierarchy is valid.
+    violation: Deny without creating the member or session.
+  - id: INV-B02
+    name: Scoped task creation and assignment
+    rule: The Team Lead MAY create tasks and assign them to any active member in
+      the run. A Domain Lead MAY create tasks and assign them only to active
+      members in its descendant subtree, regardless of the task's workstream.
+      Other members MUST NOT create or assign tasks.
+    check: The actor is the Team Lead or a Domain Lead; every assignee is active
+      and, for a Domain Lead, in `descendants(actor)`.
+    violation: Deny without creating the task or changing its assignment.
+  - id: INV-B03
+    name: Hierarchical direct messaging
+    rule: The Team Lead MAY send direct messages to any active member in the
+      run. Every other active member MUST send direct messages only to its
+      immediate parent or immediate children. Communication between branches
+      MUST be relayed through the hierarchy.
+    check: '`sender != recipient AND sender is active AND recipient is active
+      AND (sender == teamRun.leadMemberId OR parent(sender) == recipient OR
+      parent(recipient) == sender)`.'
+    violation: Refuse delivery.
+  - id: INV-B04
+    name: Do not bypass blocked dependencies
+    rule: A task MUST NOT start an execution while any declared blocking task
+      remains unresolved. A dependency is resolved only when the blocking task
+      is `done` and its latest submitted execution report outcome is `completed`.
+    check: '`all(blocker.status == "done" and
+      blocker.report.outcome == "completed" for blocker in blockers(task))`
+      immediately before start.'
+    violation: Do not start; leave task pending or blocked and report blockers.
+  - id: INV-B05
+    name: Controlled execution start
+    rule: An execution MAY start only when its task is assigned to the execution
+      member, that member is active, OpenCode accepts continuation of that
+      member's existing session, its session record has no `deletedAt`,
+      dependencies are resolved, and no other active execution exists for that
+      task or member. The stored session `status` alone does not determine
+      usability. These conditions MUST be checked as one atomic admission
+      decision where state can change concurrently.
+    check: Assignee, active member, OpenCode accepts the existing session ID,
+      session has no `deletedAt`, dependencies are ready, and there is no active
+      execution for the task or member.
+    violation: Reject start without partial state changes.
+  - id: INV-B06
+    name: Retry without identity loss
+    rule: Resuming or retrying a task MUST preserve the original task ID and
+      past execution records. If the same member continues, it MUST use that
+      member's existing session. A reassignment MUST be explicit and authorized.
+    check: New execution with same task ID, distinct execution ID; session
+      matches the current member.
+    violation: Reject implicit replacement or silent reassignment.
+  - id: INV-B07
+    name: Review precedes acceptance
+    rule: An execution's successful result MUST NOT automatically mark its task
+      `done`. A task MAY be marked `done` only after explicit acceptance of its
+      latest execution report with outcome `completed`. The Team Lead MAY accept
+      any task; a Domain Lead MAY accept only tasks assigned to members in its
+      descendant subtree.
+    check: The transition from `review` to `done` is performed by the Team Lead
+      or by a Domain Lead whose descendant subtree contains the task assignee,
+      and the latest submitted execution report has outcome `completed`.
+    violation: Reject unapproved completion.
+  - id: INV-B08
+    name: Report belongs to an execution
+    rule: A report describing work performed MUST be attributable to a specific
+      execution, with outcome, summary, and any test results or file changes. A
+      task-level summary MAY be derived from execution reports but MUST NOT
+      replace their provenance.
+    check: Each persisted execution report is attached to its owning valid
+      execution; a task-level report view is derived from an execution report.
+    violation: Reject untraceable completion reports.
+  - id: INV-B10
+    name: Concurrency-safe updates
+    rule: Mutations to any mutable record in a run MUST NOT silently overwrite a
+      newer version. Updates MUST use an expected version or an equivalent
+      atomic conflict-detection mechanism.
+    check: The record's current version matches the expected version at write
+      time.
+    violation: Reject with a conflict; reload before retrying.

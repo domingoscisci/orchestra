@@ -243,7 +243,19 @@
       "sessionId": "ses-storage-check",
       "status": "concluded",
       "startedAt": "2026-11-12T09:10:00Z",
-      "endedAt": "2026-11-12T09:32:00Z"
+      "endedAt": "2026-11-12T09:32:00Z",
+      "report": {
+        "summary": "Read-after-write passed in the plugin session.",
+        "outcome": "completed",
+        "filesModified": [],
+        "tests": [
+          {
+            "name": "Plugin storage roundtrip",
+            "result": "passed"
+          }
+        ],
+        "references": []
+      }
     },
     {
       "id": "execution-report-shape-1",
@@ -253,7 +265,19 @@
       "sessionId": "ses-schema",
       "status": "concluded",
       "startedAt": "2026-11-12T09:12:00Z",
-      "endedAt": "2026-11-12T09:36:00Z"
+      "endedAt": "2026-11-12T09:36:00Z",
+      "report": {
+        "summary": "Core fields are defined; validation rules remain to be agreed before implementation.",
+        "outcome": "partial",
+        "filesModified": ["src/task-report.ts"],
+        "tests": [
+          {
+            "name": "Type check",
+            "result": "not_run"
+          }
+        ],
+        "references": ["https://example.invalid/report-draft"]
+      }
     },
     {
       "id": "execution-live-tests-1",
@@ -263,7 +287,19 @@
       "sessionId": "ses-test",
       "status": "interrupted",
       "startedAt": "2026-11-12T09:14:00Z",
-      "endedAt": "2026-11-12T09:24:00Z"
+      "endedAt": "2026-11-12T09:24:00Z",
+      "report": {
+        "summary": "The run was interrupted before the live environment could be prepared, so the concurrency behavior is still unknown.",
+        "outcome": "blocked",
+        "filesModified": [],
+        "tests": [
+          {
+            "name": "Live concurrent storage writes",
+            "result": "not_run"
+          }
+        ],
+        "references": []
+      }
     },
     {
       "id": "execution-board-api-1",

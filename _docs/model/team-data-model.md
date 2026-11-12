@@ -28,8 +28,9 @@ coordinate work, rather than duplicating the OpenCode event log.
 ### TeamRun
 
 - `id`: stable run identifier.
-- `rootSessionId`: ID of the main OpenCode session that owns the run.
-- `leadMemberId`: the Team Lead's member ID.
+- `rootSessionId`: ID of the main OpenCode session that owns the run; it equals
+  the Team Lead's session ID.
+- `leadMemberId`: the Team Lead's member ID; it does not change during the run.
 - `createdAt`: creation time.
 
 ### TeamMember
@@ -40,11 +41,12 @@ coordinate work, rather than duplicating the OpenCode event log.
 - `role`: selected OpenCode agent role.
 - `sessionId`: the member's OpenCode session ID; one session per member in a
   run.
+- `archivedAt`: optional timestamp; absent for active members.
 
-The session tree is the canonical team hierarchy. A member's parent is derived
-from the parent of their session; do not persist a second, independently
-editable member-parent relationship. This supports a Team Lead with direct
-reports and Domain Leads with their own child agents.
+The session tree is the canonical hierarchy for active members. A member's
+parent is derived from the parent of their session; do not persist a second,
+independently editable member-parent relationship. Archived member records stay
+in storage for historical references but are excluded from the active team.
 
 ### Session
 
@@ -54,9 +56,13 @@ reports and Domain Leads with their own child agents.
 - `parentSessionId`: parent OpenCode session ID, when present.
 - `status`: current lifecycle state: `started`, `concluded`, or `interrupted`.
 - `updatedAt`: time of the latest status update.
+- `deletedAt`: optional timestamp when the OpenCode session is deleted.
 
 Update the current status from OpenCode events. Do not duplicate the full event
-history. The session remains addressable by its OpenCode ID.
+history. When an OpenCode session is deleted during member archival, retain its
+session record and ID in storage for historical references; set `deletedAt`.
+Before starting an execution, verify that OpenCode accepts continuation of the
+existing session ID; the stored lifecycle status alone does not establish that.
 
 ### Domain
 
@@ -64,7 +70,7 @@ history. The session remains addressable by its OpenCode ID.
 - `runId`: owning run.
 - `name`: responsibility area.
 - `leadMemberId`: Domain Lead.
-- `memberIds`: members participating in the domain.
+- `memberIds`: active members participating in the domain.
 
 Domains describe people and responsibilities. They are distinct from
 workstreams, which group tasks; a task or workstream does not inherit domain
@@ -85,16 +91,30 @@ workstream. Workstreams have no required relationship to domains.
 - `runId`: owning run.
 - `title` and `description`: objective and expected result.
 - `status`: `todo`, `doing`, `review`, or `done`.
-- `assigneeMemberId`: current assignee, when assigned; at most one at a time.
+- `assigneeMemberId`: current active assignee, when assigned; at most one at a
+  time.
 - `workstreamId`: optional workstream.
-- `report`: the agent's result, with the fields defined below.
+- `report`: a read-time view of the most recent submitted execution report,
+  absent when no execution has submitted a report. It is not an independent
+  source of truth.
 - `updatedAt`: time of the latest board update.
 
-The agent updates only the assigned task, its report, and its transition to
-`review`. The Team Lead manages assignment, dependencies, and approval. The
-Team Lead moves a reviewed task to `done` or back to `doing`.
+The Team Lead creates tasks and manages assignment and dependencies. A Domain
+Lead may create tasks and assign them only to members in its descendant
+subtree. Any assigned agent may update only their assigned task, submit its
+execution report, and move it to `review`. The Team Lead may move any reviewed
+task to `done` only when its latest submitted execution report has outcome
+`completed`, or back to `doing` for more work. A Domain Lead may accept a
+reviewed task assigned to a member in its descendant subtree and move it to
+`done` under the same condition.
 
-### Task report
+### Execution report
+
+Each `TaskExecution` may have a report describing that attempt. This is the
+canonical report; task-level report views are derived from the most recent
+execution report and MUST NOT replace execution provenance. A combined read
+snapshot may include both the canonical execution report and its derived task
+view.
 
 - `summary`: free text describing the work and its rationale. For `partial` or
   `blocked`, explain the remaining work or the blocking issue here.
@@ -106,8 +126,9 @@ Team Lead moves a reviewed task to `done` or back to `doing`.
   URLs.
 
 `outcome` describes the result of the attempt, not the task's workflow status.
-Even `partial` or `blocked` reports are submitted with task status `review` for
-the Team Lead to inspect.
+The assigned agent submits the report with the execution. A report with outcome
+`partial` or `blocked` may be submitted for review; the task status remains
+distinct from the report outcome.
 
 ### Dependency
 
@@ -115,7 +136,7 @@ the Team Lead to inspect.
 - `blockedByTaskId`: the prerequisite task.
 
 A dependency means only “blocked by”: the blocked task cannot proceed until its
-prerequisite is `done`.
+prerequisite is `done` and its task-level report view has outcome `completed`.
 
 ### TaskExecution
 
@@ -127,11 +148,12 @@ prerequisite is `done`.
 - `status`: `started`, `concluded`, or `interrupted`.
 - `startedAt` and `endedAt`: attempt timestamps; `endedAt` is absent while
   active.
+- `report`: this attempt's report, when one has been submitted.
 
 Each assignment or resumption creates a new execution, preserving earlier
-attempts. An agent can have at most one active execution at a time. Concluding
-an execution submits the task for review; it does not itself mark the task
-`done`.
+attempts. An agent and a task can each have at most one active execution at a
+time. Concluding an execution submits the task for review; it does not itself
+mark the task `done`.
 
 ## Relationships
 
@@ -154,7 +176,8 @@ task. Dependency cycles must be rejected.
 Use separate key-value records for runs, members, sessions, domains, workstreams,
 tasks, dependencies, and task executions. Avoid rewriting a whole run document
 when an agent updates one task. Generate stable IDs for records and retain the
-OpenCode session IDs as external identifiers.
+OpenCode session IDs as external identifiers. Store reports on execution
+records; derive the task-level report view rather than persisting a second copy.
 
 This layout reduces collisions between writes to different tasks, but does not
 by itself guarantee atomic updates or prevent two writers from updating the
