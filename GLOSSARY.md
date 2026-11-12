@@ -4,6 +4,9 @@ This glossary defines the team and work-planning terms used in Orchestra.
 
 ## Team structure
 
+**Entity**:
+Generic term for an object in the model.
+
 **Team**:
 A group of agents with defined roles, coordinated by a Team Lead for one run.
 
