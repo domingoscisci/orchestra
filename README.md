@@ -65,4 +65,5 @@ bun test
 The package targets `@opencode/plugin` 2.2.6 and later compatible 2.x releases.
 
 See the [runbook](_docs/runbooks/manage-child-sessions.md) for tool usage and
-the OpenCode API workflow.
+the OpenCode API workflow. The proposed persistent board model is documented in
+the [team data model](_docs/team-data-model.md).
