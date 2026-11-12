@@ -5,6 +5,7 @@ import {
   pageSessions,
   resolveChild,
   sessionStatus,
+  trackExecution,
   summarizeMessages,
   validateTeamRoster,
 } from "../src/core"
@@ -44,6 +45,21 @@ describe("Orchestra child session lookup", () => {
     expect(sessionStatus({ id: "busy", time: { busy: 20, idle: 10 } })).toBe("busy")
     expect(sessionStatus({ id: "idle", time: { busy: 10, idle: 20 } })).toBe("idle")
     expect(sessionStatus({ id: "new" })).toBe("new")
+  })
+
+  test("tracks execution from started until any terminal event", () => {
+    const executions = new Map<string, boolean>()
+    trackExecution(executions, { type: "session.execution.started", data: { sessionID: "child" } })
+    expect(sessionStatus({ id: "child" }, executions)).toBe("busy")
+    for (const type of [
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted",
+    ]) {
+      executions.set("child", true)
+      trackExecution(executions, { type, data: { sessionID: "child" } })
+      expect(sessionStatus({ id: "child" }, executions)).toBe("idle")
+    }
   })
 
   test("reads session messages in both plugin and API shapes", () => {

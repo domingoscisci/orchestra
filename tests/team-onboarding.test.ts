@@ -19,6 +19,7 @@ describe("Orchestra team setup smoke tests", () => {
   let directory: string
   let tools: Record<string, { execute: (input: any, context: any) => Promise<any> }>
   let sessions: Map<string, any>
+  let storage: Map<string, unknown>
   let removed: string[]
   let events: string[]
   let failCreateAt = 0
@@ -38,6 +39,7 @@ describe("Orchestra team setup smoke tests", () => {
     sessions = new Map([[
       "main", { id: "main", agent: "build", directory },
     ]])
+    storage = new Map()
     failCreateAt = 0
     failPrompt = false
     failStateSave = false
@@ -51,6 +53,7 @@ describe("Orchestra team setup smoke tests", () => {
         if (!value) throw new Error(`Missing session ${sessionID}`)
         return { ...value }
       },
+      list: async () => ({ sessions: [...sessions.values()] }),
       create: async (input: any) => {
         if (nextID + 1 === failCreateAt) throw new Error("create failed")
         const child = { ...input, id: `child-${++nextID}`, directory }
@@ -86,6 +89,11 @@ describe("Orchestra team setup smoke tests", () => {
     await plugin.setup({
       session,
       agent: agents,
+      storage: {
+        get: async (key: string) => storage.get(key),
+        set: async (key: string, value: unknown) => { storage.set(key, value) },
+        remove: async (key: string) => { storage.delete(key) },
+      },
       location: { directory },
       tool: {
         transform: async (register: (editor: any) => void) => register({
@@ -106,6 +114,27 @@ describe("Orchestra team setup smoke tests", () => {
     ...input,
   }, { sessionID: "main" })
 
+  test("storage probe reads, writes, and removes a unique value", async () => {
+    const output = await tools.storage_probe.execute({}, { sessionID: "main" })
+    expect(JSON.parse(output.content)).toEqual({
+      readMissing: true,
+      writeAndRead: true,
+      remove: true,
+    })
+    expect(storage.size).toBe(0)
+  })
+
+  test("storage probe saves for a later invocation and removes the value", async () => {
+    expect(JSON.parse((await tools.storage_probe.execute(
+      { phase: "save" }, { sessionID: "main" },
+    )).content)).toEqual({ saved: true })
+    expect(storage.size).toBe(1)
+    expect(JSON.parse((await tools.storage_probe.execute(
+      { phase: "verify" }, { sessionID: "main" },
+    )).content)).toEqual({ survivedRestart: true, remove: true })
+    expect(storage.size).toBe(0)
+  })
+
   test("activates a solo Team Lead and closes it back to the original agent", async () => {
     await activate({ roster: [], domains: [] })
     expect(sessions.get("main").id).toBe("main")
@@ -125,6 +154,23 @@ describe("Orchestra team setup smoke tests", () => {
     expect(JSON.parse(await readFile(statePath(), "utf8")).domains).toEqual(domains)
     expect(events.indexOf(`create:${childIDs[1]}`)).toBeLessThan(events.indexOf(`switch:${lead}`))
     expect(sessions.get("main").agent).toBe(lead)
+  })
+
+  test("creates a child session under the invoking child session", async () => {
+    const parent = { id: "parent-child", parentID: "main", title: "Developer", directory }
+    sessions.set(parent.id, parent)
+
+    const output = JSON.parse((await tools.create_agent.execute({
+      name: "Nested reviewer",
+      prompt: "Review the implementation",
+    }, { sessionID: parent.id })).content)
+
+    expect(output).toMatchObject({ parentID: parent.id, name: "Nested reviewer" })
+    expect(sessions.get(output.sessionID)).toMatchObject({
+      parentID: parent.id,
+      title: "Nested reviewer",
+    })
+    expect(events).toContain(`prompt:${output.sessionID}`)
   })
 
   test("activates Developer and Reviewer without Domain Leads", async () => {

@@ -76,7 +76,25 @@ export function resolveChild<T extends AgentSession>(
   return matches[0]
 }
 
-export function sessionStatus(session: AgentSession): "busy" | "idle" | "new" {
+export function trackExecution(
+  executions: Map<string, boolean>,
+  event: { type: string; data?: { sessionID?: string } },
+) {
+  const sessionID = event.data?.sessionID
+  if (!sessionID) return
+  if (event.type === "session.execution.started") executions.set(sessionID, true)
+  if ([
+    "session.execution.succeeded",
+    "session.execution.failed",
+    "session.execution.interrupted",
+  ].includes(event.type)) executions.set(sessionID, false)
+}
+
+export function sessionStatus(
+  session: AgentSession,
+  executions?: Map<string, boolean>,
+): "busy" | "idle" | "new" {
+  if (executions?.has(session.id)) return executions.get(session.id) ? "busy" : "idle"
   if (session.time?.busy && (!session.time.idle || session.time.busy > session.time.idle)) {
     return "busy"
   }

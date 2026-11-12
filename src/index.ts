@@ -8,6 +8,7 @@ import {
   pageSessions,
   resolveChild,
   sessionStatus,
+  trackExecution,
   summarizeMessages,
   validateTeamRoster,
   type TeamDomain,
@@ -130,11 +131,116 @@ export default Plugin.define({
     const session = ctx.session as unknown as SessionAPI
     const agents = (ctx as unknown as { agent: AgentAPI }).agent
     const directory = ctx.location.directory
+    const executions = new Map<string, boolean>()
+    const eventController = new AbortController()
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: eventController.signal })) {
+        trackExecution(executions, event)
+      }
+    })().catch(() => undefined)
 
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "orchestra",
         description: "Manage agents and child-agent sessions",
+      })
+
+      editor.add({
+        name: "storage_probe",
+        description: "Verify plugin storage read, write, and delete operations.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: {
+            phase: {
+              type: "string",
+              enum: ["roundtrip", "save", "verify", "concurrent"],
+            },
+          },
+          additionalProperties: false,
+        },
+        execute: async (raw) => {
+          const { phase = "roundtrip" } = raw as {
+            phase?: "roundtrip" | "save" | "verify" | "concurrent"
+          }
+          const key = "storage-probe:restart:v1"
+          const value = { probe: "persist-across-process-restart" }
+          if (phase === "save") {
+            if (await ctx.storage.get(key) !== undefined) {
+              throw new Error("Storage probe restart key already exists")
+            }
+            await ctx.storage.set(key, value)
+            return result(JSON.stringify({ saved: true }))
+          }
+
+          if (phase === "verify") {
+            try {
+              const persisted = await ctx.storage.get(key)
+              if (JSON.stringify(persisted) !== JSON.stringify(value)) {
+                throw new Error("Storage probe value did not survive process restart")
+              }
+              await ctx.storage.remove(key)
+              if (await ctx.storage.get(key) !== undefined) {
+                throw new Error("Storage probe key still exists after removal")
+              }
+              return result(JSON.stringify({
+                survivedRestart: true,
+                remove: true,
+              }))
+            } finally {
+              await ctx.storage.remove(key)
+            }
+          }
+
+          if (phase === "concurrent") {
+            const concurrentKey = `storage-probe:concurrent:${randomUUID()}`
+            const values = Array.from({ length: 16 }, (_, writer) => ({
+              writer,
+              payload: String(writer).repeat(4096),
+            }))
+            try {
+              await Promise.all(values.map((value) => ctx.storage.set(concurrentKey, value)))
+              const saved = await ctx.storage.get(concurrentKey)
+              if (!values.some((value) => JSON.stringify(value) === JSON.stringify(saved))) {
+                throw new Error("Concurrent storage writes produced an unknown or partial value")
+              }
+              await ctx.storage.remove(concurrentKey)
+              if (await ctx.storage.get(concurrentKey) !== undefined) {
+                throw new Error("Concurrent storage probe key still exists after removal")
+              }
+              return result(JSON.stringify({
+                writers: values.length,
+                finalValueIntact: true,
+                remove: true,
+              }))
+            } finally {
+              await ctx.storage.remove(concurrentKey)
+            }
+          }
+
+          const roundtripKey = `storage-probe:${randomUUID()}`
+          const before = await ctx.storage.get(roundtripKey)
+          if (before !== undefined) throw new Error("Storage probe key already exists")
+
+          try {
+            await ctx.storage.set(roundtripKey, value)
+            const saved = await ctx.storage.get(roundtripKey)
+            if (JSON.stringify(saved) !== JSON.stringify(value)) {
+              throw new Error("Storage probe read-after-write mismatch")
+            }
+            await ctx.storage.remove(roundtripKey)
+            if (await ctx.storage.get(roundtripKey) !== undefined) {
+              throw new Error("Storage probe key still exists after removal")
+            }
+            return result(JSON.stringify({
+              readMissing: true,
+              writeAndRead: true,
+              remove: true,
+            }))
+          } finally {
+            await ctx.storage.remove(roundtripKey)
+          }
+        },
       })
 
       editor.add({
@@ -479,7 +585,7 @@ export default Plugin.define({
               title: child.title,
               agent: child.agent,
               model: child.model,
-              status: sessionStatus(child),
+              status: sessionStatus(child, executions),
               outcome: child.outcome,
             }))))
           }
@@ -494,7 +600,7 @@ export default Plugin.define({
             title: details.title,
             agent: details.agent,
             model: details.model,
-            status: sessionStatus(details),
+            status: sessionStatus(details, executions),
             outcome: details.outcome,
             messages: summarizeMessages(messages),
           }))
@@ -525,5 +631,6 @@ export default Plugin.define({
         },
       })
     })
+    return () => eventController.abort()
   },
 })
