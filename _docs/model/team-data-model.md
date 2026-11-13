@@ -28,39 +28,32 @@ coordinate work, rather than duplicating the OpenCode event log.
 ### TeamRun
 
 - `id`: stable run identifier.
-- `rootSessionId`: ID of the main OpenCode session that owns the run; it equals
-  the Team Lead's session ID.
 - `leadMemberId`: the Team Lead's member ID; it does not change during the run.
 - `createdAt`: creation time.
+
+The complete roster, names, roles, acronyms, session identities, and hierarchy
+are created with the run and remain fixed for its lifetime. A different team
+structure requires a new run. The root session ID is the Team Lead's embedded
+session ID.
 
 ### TeamMember
 
 - `id`: stable member identifier within the run.
 - `runId`: owning run.
 - `name`: display name within the team.
+- `acronym`: required short name, unique within the run. Generate it from the
+  name's initials during onboarding; append a number to resolve collisions.
 - `role`: selected OpenCode agent role.
-- `sessionId`: the member's OpenCode session ID; one session per member in a
-  run.
-- `archivedAt`: optional timestamp; absent for active members.
+- `session`: the member's single embedded OpenCode session:
+  - `id`: OpenCode session ID, unique within the run.
+  - `parentSessionId`: parent OpenCode session ID, when present.
+  - `status`: current lifecycle state: `started`, `concluded`, or `interrupted`.
+  - `updatedAt`: time of the latest status update.
 
-The session tree is the canonical hierarchy for active members. A member's
-parent is derived from the parent of their session; do not persist a second,
-independently editable member-parent relationship. Archived member records stay
-in storage for historical references but are excluded from the active team.
-
-### Session
-
-- `id`: OpenCode session ID.
-- `runId`: owning run.
-- `memberId`: the team member using this session.
-- `parentSessionId`: parent OpenCode session ID, when present.
-- `status`: current lifecycle state: `started`, `concluded`, or `interrupted`.
-- `updatedAt`: time of the latest status update.
-- `deletedAt`: optional timestamp when the OpenCode session is deleted.
-
-Update the current status from OpenCode events. Do not duplicate the full event
-history. When an OpenCode session is deleted during member archival, retain its
-session record and ID in storage for historical references; set `deletedAt`.
+The session tree is the canonical team hierarchy. A member's parent is derived
+by resolving `session.parentSessionId` to another member's `session.id`; do not
+persist a second, independently editable member-parent relationship. Update
+session status from OpenCode events without duplicating the full event history.
 Before starting an execution, verify that OpenCode accepts continuation of the
 existing session ID; the stored lifecycle status alone does not establish that.
 
@@ -70,7 +63,7 @@ existing session ID; the stored lifecycle status alone does not establish that.
 - `runId`: owning run.
 - `name`: responsibility area.
 - `leadMemberId`: Domain Lead.
-- `memberIds`: active members participating in the domain.
+- `memberIds`: members participating in the domain.
 
 Domains describe people and responsibilities. They are distinct from
 workstreams, which group tasks; a task or workstream does not inherit domain
@@ -91,13 +84,16 @@ workstream. Workstreams have no required relationship to domains.
 - `runId`: owning run.
 - `title` and `description`: objective and expected result.
 - `status`: `todo`, `doing`, `review`, or `done`.
-- `assigneeMemberId`: current active assignee, when assigned; at most one at a
-  time.
+- `assigneeMemberId`: current assignee, when assigned; at most one at a time.
 - `workstreamId`: optional workstream.
 - `report`: a read-time view of the most recent submitted execution report,
   absent when no execution has submitted a report. It is not an independent
   source of truth.
 - `updatedAt`: time of the latest board update.
+
+The `id` is the identifier agents use to refer to the task; all schema
+references use the same value. There is no separate display ID. Short IDs such
+as `T1` or `R1` are examples; prefixes have no required meaning.
 
 The Team Lead creates tasks and manages assignment and dependencies. A Domain
 Lead may create tasks and assign them only to members in its descendant
@@ -144,7 +140,6 @@ prerequisite is `done` and its task-level report view has outcome `completed`.
 - `runId`: owning run.
 - `taskId`: task being attempted.
 - `memberId`: agent performing the attempt.
-- `sessionId`: OpenCode session used for the attempt.
 - `status`: `started`, `concluded`, or `interrupted`.
 - `startedAt` and `endedAt`: attempt timestamps; `endedAt` is absent while
   active.
@@ -159,24 +154,26 @@ mark the task `done`.
 
 ```text
 TeamRun
-├── TeamMember ── Session ── parentSessionId ──> Session
+├── TeamMember ── embedded session.parentSessionId ──> TeamMember.session.id
 ├── Domain ── leadMemberId / memberIds ──> TeamMember
 ├── Workstream
 └── Task ── optional workstreamId ──> Workstream
     ├── Dependency ── blockedByTaskId ──> Task
-    └── TaskExecution ── memberId / sessionId ──> TeamMember / Session
+    └── TaskExecution ── memberId ──> TeamMember ──> embedded session
 ```
 
-Every referenced member, session, task, and workstream must belong to the same
-run as the record that references it. Dependencies must not point to the same
-task. Dependency cycles must be rejected.
+Every referenced member, task, and workstream must belong to the same run as
+the record that references it. Each execution's session is derived from its
+member. Dependencies must not point to the same task. Dependency cycles must be
+rejected.
 
 ## Persistence shape
 
-Use separate key-value records for runs, members, sessions, domains, workstreams,
-tasks, dependencies, and task executions. Avoid rewriting a whole run document
-when an agent updates one task. Generate stable IDs for records and retain the
-OpenCode session IDs as external identifiers. Store reports on execution
+Use separate key-value records for runs, members, domains, workstreams, tasks,
+dependencies, and task executions. Keep session metadata embedded in its member
+record; do not persist a separate Session record. Avoid rewriting a whole run
+document when an agent updates one task. Generate stable IDs for records and
+retain OpenCode session IDs as external identifiers. Store reports on execution
 records; derive the task-level report view rather than persisting a second copy.
 
 This layout reduces collisions between writes to different tasks, but does not
@@ -200,8 +197,8 @@ Session:   started → concluded
 
 An interrupted attempt can be followed by a new execution for the same task.
 The task may remain `doing` until the Lead or a subsequent execution moves it
-forward. Session and execution state are stored separately because session
-lifecycle and task-attempt lifecycle are related but not interchangeable.
+forward. Session lifecycle and task-attempt lifecycle remain distinct even
+though session metadata is embedded in the member record.
 
 ## Open implementation questions
 

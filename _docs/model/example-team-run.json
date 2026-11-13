@@ -1,7 +1,6 @@
 {
   "teamRun": {
     "id": "run-demo-001",
-    "rootSessionId": "ses-team-lead",
     "leadMemberId": "member-team-lead",
     "createdAt": "2026-11-12T09:00:00Z"
   },
@@ -10,107 +9,91 @@
       "id": "member-team-lead",
       "runId": "run-demo-001",
       "name": "Team Lead",
+      "acronym": "TL",
       "role": "build",
-      "sessionId": "ses-team-lead"
+      "session": {
+        "id": "ses-team-lead",
+        "status": "started",
+        "updatedAt": "2026-11-12T09:00:00Z"
+      }
     },
     {
       "id": "member-domain-lead",
       "runId": "run-demo-001",
       "name": "Persistence Lead",
+      "acronym": "PL",
       "role": "developer",
-      "sessionId": "ses-domain-lead"
+      "session": {
+        "id": "ses-domain-lead",
+        "parentSessionId": "ses-team-lead",
+        "status": "started",
+        "updatedAt": "2026-11-12T09:04:00Z"
+      }
     },
     {
       "id": "member-storage-check",
       "runId": "run-demo-001",
       "name": "Storage Check",
+      "acronym": "SC",
       "role": "reviewer",
-      "sessionId": "ses-storage-check"
+      "session": {
+        "id": "ses-storage-check",
+        "parentSessionId": "ses-domain-lead",
+        "status": "concluded",
+        "updatedAt": "2026-11-12T09:32:00Z"
+      }
     },
     {
       "id": "member-schema",
       "runId": "run-demo-001",
       "name": "Schema Agent",
+      "acronym": "SA",
       "role": "developer",
-      "sessionId": "ses-schema"
+      "session": {
+        "id": "ses-schema",
+        "parentSessionId": "ses-domain-lead",
+        "status": "concluded",
+        "updatedAt": "2026-11-12T09:36:00Z"
+      }
     },
     {
       "id": "member-test",
       "runId": "run-demo-001",
       "name": "Test Agent",
+      "acronym": "TA",
       "role": "tester",
-      "sessionId": "ses-test"
+      "session": {
+        "id": "ses-test",
+        "parentSessionId": "ses-domain-lead",
+        "status": "interrupted",
+        "updatedAt": "2026-11-12T09:24:00Z"
+      }
     },
     {
       "id": "member-api",
       "runId": "run-demo-001",
       "name": "API Agent",
+      "acronym": "AA",
       "role": "developer",
-      "sessionId": "ses-api"
+      "session": {
+        "id": "ses-api",
+        "parentSessionId": "ses-team-lead",
+        "status": "started",
+        "updatedAt": "2026-11-12T09:40:00Z"
+      }
     },
     {
       "id": "member-docs",
       "runId": "run-demo-001",
       "name": "Docs Agent",
+      "acronym": "DA",
       "role": "writer",
-      "sessionId": "ses-docs"
-    }
-  ],
-  "sessions": [
-    {
-      "id": "ses-team-lead",
-      "runId": "run-demo-001",
-      "memberId": "member-team-lead",
-      "status": "started",
-      "updatedAt": "2026-11-12T09:00:00Z"
-    },
-    {
-      "id": "ses-domain-lead",
-      "runId": "run-demo-001",
-      "memberId": "member-domain-lead",
-      "parentSessionId": "ses-team-lead",
-      "status": "started",
-      "updatedAt": "2026-11-12T09:04:00Z"
-    },
-    {
-      "id": "ses-storage-check",
-      "runId": "run-demo-001",
-      "memberId": "member-storage-check",
-      "parentSessionId": "ses-domain-lead",
-      "status": "concluded",
-      "updatedAt": "2026-11-12T09:32:00Z"
-    },
-    {
-      "id": "ses-schema",
-      "runId": "run-demo-001",
-      "memberId": "member-schema",
-      "parentSessionId": "ses-domain-lead",
-      "status": "concluded",
-      "updatedAt": "2026-11-12T09:36:00Z"
-    },
-    {
-      "id": "ses-test",
-      "runId": "run-demo-001",
-      "memberId": "member-test",
-      "parentSessionId": "ses-domain-lead",
-      "status": "interrupted",
-      "updatedAt": "2026-11-12T09:24:00Z"
-    },
-    {
-      "id": "ses-api",
-      "runId": "run-demo-001",
-      "memberId": "member-api",
-      "parentSessionId": "ses-team-lead",
-      "status": "started",
-      "updatedAt": "2026-11-12T09:40:00Z"
-    },
-    {
-      "id": "ses-docs",
-      "runId": "run-demo-001",
-      "memberId": "member-docs",
-      "parentSessionId": "ses-team-lead",
-      "status": "concluded",
-      "updatedAt": "2026-11-12T09:28:00Z"
+      "session": {
+        "id": "ses-docs",
+        "parentSessionId": "ses-team-lead",
+        "status": "concluded",
+        "updatedAt": "2026-11-12T09:28:00Z"
+      }
     }
   ],
   "domains": [
@@ -142,7 +125,7 @@
     ],
     "tasks": [
       {
-        "id": "task-storage-probe",
+        "id": "T1",
         "runId": "run-demo-001",
         "title": "Verify storage read and write",
         "description": "Check that plugin storage preserves JSON values.",
@@ -164,7 +147,7 @@
         "updatedAt": "2026-11-12T09:32:00Z"
       },
       {
-        "id": "task-report-shape",
+        "id": "T2",
         "runId": "run-demo-001",
         "title": "Define the task report shape",
         "description": "Specify report fields for the board.",
@@ -186,7 +169,7 @@
         "updatedAt": "2026-11-12T09:36:00Z"
       },
       {
-        "id": "task-live-tests",
+        "id": "T3",
         "runId": "run-demo-001",
         "title": "Run the live storage concurrency test",
         "description": "Verify concurrent writes using the loaded plugin.",
@@ -208,7 +191,7 @@
         "updatedAt": "2026-11-12T09:24:00Z"
       },
       {
-        "id": "task-board-api",
+        "id": "T4",
         "runId": "run-demo-001",
         "title": "Connect tasks to the board API",
         "description": "Persist task status and assignment updates.",
@@ -218,7 +201,7 @@
         "updatedAt": "2026-11-12T09:40:00Z"
       },
       {
-        "id": "task-board-ui",
+        "id": "T5",
         "runId": "run-demo-001",
         "title": "Expose board task summaries",
         "description": "Show report summaries to the Team Lead.",
@@ -229,8 +212,8 @@
     ],
     "dependencies": [
       {
-        "taskId": "task-board-ui",
-        "blockedByTaskId": "task-board-api"
+        "taskId": "T5",
+        "blockedByTaskId": "T4"
       }
     ]
   },
@@ -238,9 +221,8 @@
     {
       "id": "execution-storage-probe-1",
       "runId": "run-demo-001",
-      "taskId": "task-storage-probe",
+      "taskId": "T1",
       "memberId": "member-storage-check",
-      "sessionId": "ses-storage-check",
       "status": "concluded",
       "startedAt": "2026-11-12T09:10:00Z",
       "endedAt": "2026-11-12T09:32:00Z",
@@ -260,9 +242,8 @@
     {
       "id": "execution-report-shape-1",
       "runId": "run-demo-001",
-      "taskId": "task-report-shape",
+      "taskId": "T2",
       "memberId": "member-schema",
-      "sessionId": "ses-schema",
       "status": "concluded",
       "startedAt": "2026-11-12T09:12:00Z",
       "endedAt": "2026-11-12T09:36:00Z",
@@ -282,9 +263,8 @@
     {
       "id": "execution-live-tests-1",
       "runId": "run-demo-001",
-      "taskId": "task-live-tests",
+      "taskId": "T3",
       "memberId": "member-test",
-      "sessionId": "ses-test",
       "status": "interrupted",
       "startedAt": "2026-11-12T09:14:00Z",
       "endedAt": "2026-11-12T09:24:00Z",
@@ -304,9 +284,8 @@
     {
       "id": "execution-board-api-1",
       "runId": "run-demo-001",
-      "taskId": "task-board-api",
+      "taskId": "T4",
       "memberId": "member-api",
-      "sessionId": "ses-api",
       "status": "started",
       "startedAt": "2026-11-12T09:38:00Z"
     }
