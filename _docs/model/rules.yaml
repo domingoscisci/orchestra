@@ -114,20 +114,21 @@ sections:
       the run starts. No one MAY change `teamRun.leadMemberId`, add or remove
       members, change member names,
       roles or acronyms, or change session IDs or parent-child relationships
-      during the run. Session lifecycle status and `updatedAt` MAY change from
-      OpenCode events.
+      during the run. Embedded session status and `updatedAt` MAY change from
+      OpenCode execution events; status records the latest observed execution,
+      not whether the OpenCode session is terminal or reusable.
     check: '`teamRun.leadMemberId`, member IDs, names, roles, acronyms, session
       IDs, and parent-session links remain unchanged after run creation;
-      lifecycle status updates are allowed.'
+      latest observed execution status updates are allowed.'
     violation: Reject the team-structure change without altering the structure.
   - id: INV-B02
     name: Scoped task creation and assignment
-    rule: The Team Lead MAY create tasks and assign them to any member in the
-      run. A Domain Lead MAY create tasks and assign them only to members in its
-      descendant subtree, regardless of the task's workstream.
+    rule: The Team Lead MAY create tasks and assign them to any other member in
+      the run. A Domain Lead MAY create tasks and assign them only to other
+      members of its domain, regardless of the task's workstream.
       Other members MUST NOT create or assign tasks.
     check: The actor is the Team Lead or a Domain Lead; for a Domain Lead, every
-      assignee is in `descendants(actor)`.
+      assignee is in the actor's domain `memberIds`.
     violation: Deny without creating the task or changing its assignment.
   - id: INV-B03
     name: Hierarchical direct messaging
@@ -138,7 +139,8 @@ sections:
     check: '`sender != recipient AND
       (sender == teamRun.leadMemberId OR parent(sender) == recipient OR
       parent(recipient) == sender)`.'
-    violation: Refuse delivery.
+    violation: Agent should not send the message; relay it through the hierarchy.
+      Messaging transport does not enforce this operational rule.
   - id: INV-B04
     name: Do not bypass blocked dependencies
     rule: A task MUST NOT start an execution while any declared blocking task
@@ -173,11 +175,11 @@ sections:
     rule: An execution's successful result MUST NOT automatically mark its task
       `done`. A task MAY be marked `done` only after explicit acceptance of its
       latest execution report with outcome `completed`. The Team Lead MAY accept
-      any task; a Domain Lead MAY accept only tasks assigned to members in its
-      descendant subtree.
+      any task; a Domain Lead MAY accept only tasks assigned to another member in
+      its domain.
     check: The transition from `review` to `done` is performed by the Team Lead
-      or by a Domain Lead whose descendant subtree contains the task assignee,
-      and the latest submitted execution report has outcome `completed`.
+      or by a Domain Lead whose domain contains the task assignee, and the latest
+      submitted execution report has outcome `completed`.
     violation: Reject unapproved completion.
   - id: INV-B08
     name: Report belongs to an execution
@@ -196,3 +198,36 @@ sections:
     check: The record's current version matches the expected version at write
       time.
     violation: Reject with a conflict; reload before retrying.
+  - id: INV-B11
+    name: Background subagent work
+    rule: Work delegated to a subagent MUST be started in the background so the
+      main conversation remains available. The delegating agent MUST retain the
+      explicit session identity and MUST NOT wait synchronously for the whole
+      task.
+    check: Delegation returns control to the main conversation while the
+      identified child session continues independently.
+    violation: Do not start delegated work in a blocking foreground mode.
+  - id: INV-B12
+    name: Message delivery is not acknowledgment
+    rule: Successful message submission MUST NOT be treated as proof that the
+      recipient read, accepted, or started the work. Task acceptance MUST be
+      recorded only through `acknowledge_task`; assignment/transport receipts
+      and initial acknowledgments MUST NOT be repeated to the user as progress
+      updates.
+    check: A task remains `pending_ack` until its assigned member records
+      `started` or `blocked` through the acknowledgment tool.
+    violation: Keep the task pending; do not report it as started or accepted.
+  - id: INV-B13
+    name: Authorized and tracked task assignment
+    rule: `assign_task` MUST target another member of the active fixed roster.
+      The Team Lead MAY assign to any other member; a Domain Lead MAY assign
+      only to other members of its domain; other members MUST NOT assign tasks.
+      A member MUST NOT receive a second active assignment. Task attempts MUST
+      be recorded with a unique ID and explicit status. `report_task` MUST close
+      an active attempt as `completed` or `blocked` and preserve its summary.
+    check: The caller, target, active team membership, assignment status, and
+      Domain Lead scope are valid before the prompt is sent; status transitions
+      are `pending_ack` -> `started` -> `completed|blocked`, or
+      `pending_ack` -> `blocked`.
+    violation: Reject invalid assignment or transition without partial state
+      changes. A blocked attempt requires a new explicit assignment to retry.

@@ -2,7 +2,8 @@
   "teamRun": {
     "id": "run-demo-001",
     "leadMemberId": "member-team-lead",
-    "createdAt": "2026-11-12T09:00:00Z"
+    "createdAt": "2026-11-12T09:00:00Z",
+    "originalAgent": "plan"
   },
   "teamMembers": [
     {

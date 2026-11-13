@@ -1,7 +1,7 @@
 # OpenCode Orchestra
 
-Orchestra adds tools for team onboarding and for creating, messaging,
-inspecting, and deleting child OpenCode sessions.
+Orchestra adds team onboarding, background assignments to fixed roster members
+with an acknowledgment/report lifecycle, and child-session management tools.
 
 ## Use from a checkout
 
@@ -28,9 +28,12 @@ cp "/path/to/orchestra/src/commands/team.md" .opencode/commands/team.md
 ```
 
 Restart OpenCode, then run `/team setup` to configure a team or `/team done` to
-close it. Commit `.opencode/commands/team.md` to share the command with project
-collaborators. Team runtime state stays local in
-`.opencode/orchestra/teams/`.
+close it. On setup, Orchestra creates `TEAM.md` and creates or updates
+`AGENTS.md` in the target project. If `TEAM.md` already exists, setup asks
+whether to overwrite it or append the Orchestra rules. Commit
+`.opencode/commands/team.md` to share the command with project collaborators.
+Team runtime state is stored in OpenCode's Orchestra plugin storage, keyed by
+the Team Lead session ID. Existing local JSON team state is not migrated.
 
 ### Install globally
 
@@ -47,8 +50,9 @@ cp "/path/to/orchestra/src/commands/team.md" \
 ```
 
 Restart OpenCode. The global `/team setup` and `/team done` commands use the
-globally loaded Orchestra plugin; runtime team state is still stored in each
-project's `.opencode/orchestra/teams/` directory.
+globally loaded Orchestra plugin; team state uses the same plugin storage and
+Team Lead session keying as project installs. Setup writes the team guidance to
+the target project, not to the Orchestra plugin repository.
 
 ## Development
 

@@ -1,18 +1,29 @@
-# 0002-draft-team-management
+# 0002-approved-team-management
 
-- Status: Approved
+- Status: In Progress
 - Owner: TBD
 - Created: 2026-11-13
 - Related issues: none
 
 ## Steps
 
-- [ ] Implement the team document storage, serialized session-state updates,
+- [x] Implement the team document storage, serialized session-state updates,
       and structural model validation with focused tests.
-- [ ] Add operational team instructions to TEAM.md, reference them from
-      AGENTS.md, and test the instruction/validation boundary.
-- [ ] Validate the integrated team-management flow and update model
+- [x] Generate/update project-level TEAM.md and AGENTS.md during onboarding;
+      test overwrite, append, preservation, and instruction behavior.
+- [x] Validate the integrated team-management flow and update model
       documentation to match the implemented team storage shape.
+- [x] Require background subagent work and distinguish transport receipts from
+      explicit task acknowledgment in model rules and generated TEAM.md.
+- [x] Implement background `assign_task`, shared-state `acknowledge_task` and
+      `report_task`; enforce Team Lead/all-roster and Domain Lead/domain-member
+      authorization, one active assignment per member, and prevent `create_agent`
+      or `delete_agent` from changing an active team.
+- [x] Extend `inspect_agent` with assignment status and verify the full
+      pending-ACK, started, completed, and blocked flows without duplicate
+      user-facing progress messages.
+- [ ] Run a live OpenCode smoke test to verify background dispatch, ACK
+      visibility, and a single final/block notification.
 
 ## Problem statement
 
@@ -55,11 +66,17 @@ integrity.
   plugin to avoid lost updates. The storage API has no verified atomicity or
   concurrency guarantee; do not rely on concurrent writes being safe.
 - Structural invariants are validated by application code. The model rules
-  remain documented in rules.yaml; agent operating guidance is written in
-  TEAM.md and referenced by AGENTS.md.
+  remain documented in rules.yaml; onboarding writes agent operating guidance
+  into the target project's TEAM.md and AGENTS.md.
 - INV-B03 (hierarchical direct messaging) is included in TEAM.md as an
   operational rule. General member validity and same-run membership are
   model-level preconditions and need not be repeated in each behavioral rule.
+- Delegated subagent work runs in the background. Message submission is only a
+  transport receipt; the recipient records started/blocked through the
+  acknowledgment tool, and neither receipt nor initial acknowledgment is
+  repeated to the user as progress.
+- Task assignments are persisted minimally in the team document; there is no
+  full task board, timeout, automatic queue, or automatic reassignment.
 - Existing /team setup remains the roster creation flow; this plan adds the
   persistent team model around that flow rather than redesigning onboarding.
 
@@ -89,8 +106,19 @@ in TEAM.md. AGENTS.md points agents to TEAM.md.
   observed execution status and `updatedAt` from OpenCode events.
 - Replace the old onboarding JSON for newly created teams without migrating
   existing team state.
-- Create TEAM.md with operational rules, including INV-B03, and create or
-  update root AGENTS.md to reference TEAM.md.
+- During onboarding, create TEAM.md with the team definition, agent descriptions,
+  hierarchy, domains, and clear MUST/MUST NOT rules without internal invariant
+  codes; ask whether to overwrite (recommended) or append if it already exists.
+- Include background delegation and explicit acknowledgment semantics in the
+  generated TEAM.md. Add structured assignment, acknowledgment, and report tools;
+  do not treat `send_message` submission as proof of acceptance.
+- Keep task status minimal and scoped to the active team; assignments target
+  existing roster members, and `create_agent`/`delete_agent` cannot mutate an
+  active roster.
+- Domain Leads assign only to other members of their domain; the existing flat
+  session hierarchy remains unchanged.
+- During onboarding, create AGENTS.md when absent, or append the TEAM.md
+  reference when present without replacing existing instructions.
 - Test valid and invalid team structures, domain membership, acronym
   uniqueness, serialized session-event updates, and the operational-rule
   documentation.
@@ -100,12 +128,15 @@ in TEAM.md. AGENTS.md points agents to TEAM.md.
 
 ### Out of scope
 
-- Workstream, Task, Dependency, TaskExecution, reports, assignments, execution
-  lifecycle, task authorization, and board UI/API.
+- Workstream, Task, Dependency, TaskExecution, reports, execution lifecycle,
+  board task authorization, and board UI/API. Only the latest lightweight
+  assignment handshake is stored per member; no assignment history is retained.
 - Team membership changes, archival, removal, reparenting, or role changes after
   run creation.
 - Implementing direct-message transport or enforcement in the messaging
   subsystem; INV-B03 is included as operational guidance in TEAM.md.
+- A general task board, dependencies, automatic retries, acknowledgment
+  timeouts, and assignment queueing.
 - Duplicating general identity/run-membership preconditions inside each
   behavioral rule.
 - Migrating existing team state stored in the old onboarding JSON format.
@@ -147,16 +178,38 @@ in TEAM.md. AGENTS.md points agents to TEAM.md.
 - Structural invariants INV-S01 through INV-S06 and INV-S14 are enforced both
   when creating a team and when reading persisted team state. Invalid state is
   rejected rather than silently accepted.
-- TEAM.md documents INV-B03 as an agent operating rule for hierarchical direct
-  messaging; no messaging transport enforcement is added. General member
-  validity and same-run membership remain model-level preconditions.
-- Root AGENTS.md points agents to TEAM.md.
+- Onboarding writes TEAM.md with team/agent definitions, role descriptions,
+  hierarchy, domains, and explicit MUST/MUST NOT operating rules, without
+  exposing internal invariant codes. Messaging enforcement remains
+  instructional; structural validity remains enforced by the model validator.
+- Generated TEAM.md requires background subagent delegation, treats message
+  submission as a transport receipt rather than acceptance, and requires the
+  structured acknowledgment/report tools. Dispatch and initial ACK do not
+  produce user-facing progress messages; only final results or unresolved
+  blockers are surfaced.
+- The latest assignment is embedded in its assignee's member record with a
+  unique ID and `pending_ack`, `started`, `blocked`, or `completed` status.
+  Active work is limited to one assignment per member; terminal records may be
+  replaced by a later assignment, while OpenCode retains the conversation history.
+- Team Lead assignment is available to any other roster member. Domain Leads
+  may assign only to other members of their domain. Other members cannot assign.
+- The assigner receives no prompt for an initial ACK and one prompt for
+  completion or a block; non-lead assigners relay only actionable updates to
+  their parent when needed. Only unresolved blocks are surfaced to the user.
+- `inspect_agent` shows the latest assignment and status. `create_agent` and
+  `delete_agent` reject membership changes while a team is active.
+- Onboarding creates AGENTS.md if absent, or appends the TEAM.md reference
+  without overwriting existing content.
 - Tests cover valid and invalid structures, domain references, acronym
   uniqueness, separated state for different main sessions, overlapping session
   updates, repeated execution-state transitions on one session, stale status
   limitations, and the documented instruction/validation boundary.
 - `_docs/team-data-model.md` accurately distinguishes the team document shape
   from any still-proposed persistence layout for out-of-scope board entities.
+- Validation: `bun test` passed (52 tests); `git diff --check` is clean.
+- Remaining verification: run the new assignment lifecycle against live
+  OpenCode before treating its messaging and notification behavior as runtime
+  confirmed.
 
 ## Promotion criteria
 
@@ -170,3 +223,18 @@ in TEAM.md. AGENTS.md points agents to TEAM.md.
       and test approach are clear.
 - [x] Objective, exclusions, acceptance criteria, and implementation sequence
       are sufficiently specific for approval.
+
+## Outcome
+
+- Team state now uses one validated OpenCode plugin-storage document per main
+  session. Legacy local JSON state is not migrated.
+- Session execution updates, roster immutability, acronym generation, and domain
+  membership validation are covered by tests.
+- Onboarding generates TEAM.md with the team definition, agent descriptions,
+  hierarchy, domains, and explicit plain-language rules; it creates or appends
+  the AGENTS.md reference without exposing internal invariant codes.
+- The model, example, runbook, and README describe the implemented storage
+  boundary and latest-observed-execution status semantics.
+- Original team-model validation: `bun test` passed (42 tests).
+- Limitation: writes are serialized within one plugin instance only; storage
+  does not guarantee cross-process locking or crash-safe atomicity.

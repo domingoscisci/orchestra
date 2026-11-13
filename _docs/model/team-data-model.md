@@ -2,9 +2,9 @@
 
 ## Purpose and status
 
-This document defines the proposed persistent model for a Team run and its
-work board. It records the agreed domain model; it does not claim that these
-entities or workflows are implemented.
+This document describes the implemented persistent model for a Team run and
+the minimal assignment handshake. The broader work board remains proposed and
+is not implemented.
 
 The [glossary](../../GLOSSARY.md) defines the canonical terms.
 
@@ -30,6 +30,7 @@ coordinate work, rather than duplicating the OpenCode event log.
 - `id`: stable run identifier.
 - `leadMemberId`: the Team Lead's member ID; it does not change during the run.
 - `createdAt`: creation time.
+- `originalAgent`: the agent role to restore when the Team Run is completed.
 
 The complete roster, names, roles, acronyms, session identities, and hierarchy
 are created with the run and remain fixed for its lifetime. A different team
@@ -47,15 +48,32 @@ session ID.
 - `session`: the member's single embedded OpenCode session:
   - `id`: OpenCode session ID, unique within the run.
   - `parentSessionId`: parent OpenCode session ID, when present.
-  - `status`: current lifecycle state: `started`, `concluded`, or `interrupted`.
-  - `updatedAt`: time of the latest status update.
+  - `status`: latest observed execution state: `started`, `concluded`, or
+    `interrupted`. This is not a terminal state of the OpenCode session; a
+    later execution in the same session may change it again.
+  - `updatedAt`: time the latest observed execution event was applied.
+- `assignment`: the member's latest task assignment, when present:
+  - `id`: unique assignment ID used to correlate assignment, acknowledgment,
+    and report calls.
+  - `assignedByMemberId`: Team Lead or Domain Lead who assigned the work.
+  - `task`: the assignment instructions.
+  - `status`: `pending_ack`, `started`, `blocked`, or `completed`.
+  - `createdAt` and `updatedAt`: assignment timestamps.
+  - `summary`: required for `blocked` or `completed`; the reason or final result.
+
+Only one active assignment (`pending_ack` or `started`) may exist per member.
+After a terminal status, a new assignment replaces the member's previous
+assignment record. OpenCode session history remains the record of earlier
+attempts; this field is not a task board or full assignment history.
 
 The session tree is the canonical team hierarchy. A member's parent is derived
 by resolving `session.parentSessionId` to another member's `session.id`; do not
 persist a second, independently editable member-parent relationship. Update
-session status from OpenCode events without duplicating the full event history.
-Before starting an execution, verify that OpenCode accepts continuation of the
-existing session ID; the stored lifecycle status alone does not establish that.
+session status from OpenCode execution events without duplicating the full event
+history. After a plugin restart, the last persisted status may be stale if an
+event was missed. Before starting an execution, verify that OpenCode accepts
+continuation of the existing session ID; the stored status alone does not
+establish that.
 
 ### Domain
 
@@ -95,14 +113,21 @@ The `id` is the identifier agents use to refer to the task; all schema
 references use the same value. There is no separate display ID. Short IDs such
 as `T1` or `R1` are examples; prefixes have no required meaning.
 
-The Team Lead creates tasks and manages assignment and dependencies. A Domain
-Lead may create tasks and assign them only to members in its descendant
-subtree. Any assigned agent may update only their assigned task, submit its
-execution report, and move it to `review`. The Team Lead may move any reviewed
-task to `done` only when its latest submitted execution report has outcome
-`completed`, or back to `doing` for more work. A Domain Lead may accept a
-reviewed task assigned to a member in its descendant subtree and move it to
-`done` under the same condition.
+The Team Lead may assign work to any other roster member. A Domain Lead may
+assign work only to other members of its domain. Other members cannot assign
+work. The existing session hierarchy remains independent of domain membership.
+
+Assignments use three tools: `assign_task` submits work to the target's
+existing session and returns while the task is `pending_ack`;
+`acknowledge_task` changes it to `started` after the recipient understands the
+task and begins a concrete action, or to `blocked` with a reason;
+`report_task` closes a started assignment as `completed` or `blocked` with a
+summary. The initial acknowledgment updates shared state without prompting the
+assigner. Completion or a block prompts the assigner once, so that lead can
+coordinate follow-up work. A non-lead assigner relays only actionable updates
+to its parent when needed. A blocked attempt requires an explicit new
+assignment to retry. No timeout or automatic queue is used. Assignment
+dispatch and agent creation/removal do not change the fixed team roster.
 
 ### Execution report
 
@@ -169,21 +194,31 @@ rejected.
 
 ## Persistence shape
 
-Use separate key-value records for runs, members, domains, workstreams, tasks,
-dependencies, and task executions. Keep session metadata embedded in its member
-record; do not persist a separate Session record. Avoid rewriting a whole run
-document when an agent updates one task. Generate stable IDs for records and
-retain OpenCode session IDs as external identifiers. Store reports on execution
-records; derive the task-level report view rather than persisting a second copy.
+For team state, store one JSON document per Team Run in OpenCode plugin storage
+under `team:<mainSessionID>`. The document contains TeamRun, TeamMember records
+with their embedded sessions and latest assignments, and optional Domain
+records. These remain distinct model entities even though they share one
+storage value. The Team Lead's OpenCode session ID is the key suffix; each run
+has a separate key.
 
-This layout reduces collisions between writes to different tasks, but does not
-by itself guarantee atomic updates or prevent two writers from updating the
-same record. The storage API's concurrency guarantees must be verified before
-relying on concurrent board writes.
+The board entities remain outside this implementation scope and retain the
+proposed separate-record layout: workstreams, tasks, dependencies, and task
+executions are stored independently. The lightweight member assignment is only
+the team coordination handshake and is not a board Task or TaskExecution. The
+example JSON is a logical model snapshot, not the literal value stored under a
+team key.
+
+OpenCode plugin storage does not provide a verified atomicity or concurrency
+guarantee. Orchestra serializes event-driven team updates within the plugin
+instance; this does not provide cross-process locking or crash-safe transactions.
 
 ## State transitions
 
 ```text
+Assignment: pending_ack → started → completed
+                        └→ blocked
+             pending_ack ─→ blocked
+
 Task:      todo → doing → review → done
                          ↑       │
                          └─ doing┘  (Lead requests more work)
@@ -191,8 +226,9 @@ Task:      todo → doing → review → done
 Execution: started → concluded
                   └→ interrupted
 
-Session:   started → concluded
-                  └→ interrupted
+Session status (latest observed execution): started → concluded
+                                           └→ interrupted
+                    a later execution may set it to started again
 ```
 
 An interrupted attempt can be followed by a new execution for the same task.
@@ -202,7 +238,6 @@ though session metadata is embedded in the member record.
 
 ## Open implementation questions
 
-- Verify whether storage writes are atomic and what happens when the same
-  record is updated concurrently.
+- Verify storage concurrency before adding concurrent board-record updates.
 - Define validation and recovery behavior for missing or stale OpenCode session
   references when implementing persistence.

@@ -49,6 +49,12 @@ The event schema also declares `session.retry.scheduled`; that event was not
 observed in this test. Treat the execution events as the currently verified
 signals, and test retry handling separately before relying on it.
 
+These events describe executions within a session, not terminal session state.
+Orchestra stores the latest observed execution state on the embedded session;
+another execution can update it again. After a plugin restart, that stored value
+may be stale if an event was missed and does not prove that OpenCode will accept
+continuation of the session.
+
 References:
 
 - [Plugin event subscription](https://github.com/anomalyco/opencode/blob/v2.2.6/services/site/src/docs/content/build/plugins/server.mdx)
@@ -93,7 +99,11 @@ convention is to key each team by its main session ID (the Team Lead session):
 
 ```ts
 const key = `team:${mainSessionID}`
-await ctx.storage.set(key, { originalAgent, lead, roster, domains })
+await ctx.storage.set(key, {
+  teamRun: { id: runID, leadMemberId, createdAt, originalAgent },
+  teamMembers: [{ id, runId: runID, name, acronym, role, session }],
+  domains: [{ id, runId: runID, name, leadMemberId, memberIds }],
+})
 const team = await ctx.storage.get(key)
 await ctx.storage.remove(key)
 ```
@@ -104,6 +114,10 @@ session wrote the probe under a fixed key, and a second temporary session
 successfully read and removed it. Thus storage is not automatically
 session-isolated; include the Team Lead session ID in each team-state key.
 Both temporary sessions were deleted after the test.
+
+Orchestra stores one JSON document per Team Run. The model entities remain
+distinct inside that document; the board's proposed persistence layout is
+separate. Legacy team JSON files are not imported into plugin storage.
 
 Source references for the pinned release:
 
@@ -237,6 +251,18 @@ await ctx.session.prompt({ sessionID, text })
 new child and to deliver a message to an existing session. Its return value is
 the admitted user prompt (`SessionInboxUser`); it does not mean the assistant
 has finished processing it.
+
+For active Orchestra teams, use `assign_task` rather than `send_message` to
+delegate work. It records the assignment as `pending_ack`, submits the prompt to
+the existing roster session, and returns without waiting for the agent's work.
+The prompt-submission receipt is not an acknowledgment. The assigned member
+records `started` or `blocked` with `acknowledge_task`; this updates shared team
+state without prompting the assigner. The member records the final outcome and
+summary with `report_task`, which notifies the assigner once. Use
+`inspect_agent` to verify the assignment state. A member has at most one active
+assignment; pending acknowledgments do not time out, and blocked attempts are
+not retried automatically. In an active team, `create_agent` and `delete_agent`
+are disabled to preserve the fixed roster.
 
 ### Read session context
 
