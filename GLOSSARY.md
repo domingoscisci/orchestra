@@ -49,6 +49,8 @@ The agent responsible for coordinating work and agents in a specific domain.
 
 **Domain**:
 An area of responsibility with a Domain Lead and participating team members.
+Within a Team Run, an agent may participate in no Domains or one Domain, but
+never in more than one.
 
 **Session**:
 An OpenCode conversation associated with exactly one team member in a run. Its

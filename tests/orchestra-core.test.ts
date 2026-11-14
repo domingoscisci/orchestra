@@ -102,6 +102,9 @@ describe("Orchestra team roster validation", () => {
     expect(() => validateTeamRoster("lead", [], [], agents)).not.toThrow()
     expect(() => validateTeamRoster("lead", [
       { name: "Dev", agent: "dev" },
+    ], [], agents)).not.toThrow()
+    expect(() => validateTeamRoster("lead", [
+      { name: "Dev", agent: "dev" },
       { name: "QA", agent: "dev" },
     ], [{ name: "Quality", lead: "QA", members: ["Dev", "QA"] }], agents))
       .not.toThrow()
