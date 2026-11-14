@@ -102,10 +102,11 @@ ${domains}
 - Delegated subagent work MUST run in the background so the main conversation
   remains available; retain the explicit child session ID and do not wait for
   the whole task in the foreground.
-- The Team Lead MUST assign work with assign_task to any other roster member.
-  A Domain Lead MUST assign only to other members of its domain. Other agents
-  MUST NOT assign work. Agents MUST NOT use create_agent or delete_agent to
-  change an active roster.
+- The Team Lead MUST use assign_task for delegated work and MAY assign to any
+  roster member, regardless of hierarchy level. A Domain Lead MUST use
+  assign_task only for other members of its domain. Other agents MUST NOT
+  assign work. Assignment authority does not change the reporting hierarchy.
+  Agents MUST NOT use create_agent or delete_agent to change an active roster.
 - A successful message submission confirms only that the prompt was submitted.
   It MUST NOT be treated as proof that the recipient read, accepted, or started
   the work. Assignment and message transport receipts MUST NOT be repeated to
@@ -757,13 +758,35 @@ export default Plugin.define({
                 )
               }
 
-              for (const member of input.roster) {
-                created.push(await session.create({
-                  parentID: current.id,
+              const createdByName = new Map<string, SessionInfo>()
+              const orderedRoster = [
+                ...input.roster.filter((member) => input.domains.some((domain) =>
+                  domain.lead.trim().toLowerCase() === member.name.trim().toLowerCase(),
+                )),
+                ...input.roster.filter((member) => !input.domains.some((domain) =>
+                  domain.lead.trim().toLowerCase() === member.name.trim().toLowerCase(),
+                )),
+              ]
+              for (const member of orderedRoster) {
+                const domain = input.domains.find((item) =>
+                  item.members.some((name) =>
+                    name.trim().toLowerCase() === member.name.trim().toLowerCase(),
+                  ),
+                )
+                const parent = domain && domain.lead.trim().toLowerCase() !== member.name.trim().toLowerCase()
+                  ? createdByName.get(domain.lead.trim().toLowerCase())
+                  : undefined
+                const child = await session.create({
+                  parentID: parent?.id ?? current.id,
                   title: member.name.trim(),
                   agent: member.agent,
-                }))
+                })
+                created.push(child)
+                createdByName.set(member.name.trim().toLowerCase(), child)
               }
+              const sessionsByRoster = input.roster.map((member) =>
+                createdByName.get(member.name.trim().toLowerCase())!,
+              )
 
               const team = createTeamDocument(
                 current,
@@ -771,7 +794,7 @@ export default Plugin.define({
                 originalAgent,
                 input.roster,
                 input.domains,
-                created,
+                sessionsByRoster,
               )
               stateWriteStarted = true
               await storage.set(key, team)
@@ -796,15 +819,24 @@ export default Plugin.define({
                     name.trim().toLowerCase() === member.name.toLowerCase(),
                   ),
                 )
+                const domainLead = domains.find((domain) =>
+                  domain.lead.trim().toLowerCase() !== member.name.trim().toLowerCase(),
+                )?.lead
+                const assignmentSources = domainLead
+                  ? `the Team Lead or Domain Lead ${domainLead}`
+                  : "the Team Lead"
                 await session.prompt({
-                  sessionID: created[index].id,
+                  sessionID: sessionsByRoster[index].id,
                   text: `You are ${member.name} (${member.acronym}), using the ` +
                     `${member.role} role, in an Orchestra team. ` +
                     `The Team Lead may message any member; other agents MUST ` +
                     `message only their immediate parent or children and MUST ` +
                     `relay across branches through the hierarchy. Do not bypass ` +
-                    `these rules even if the messaging tool allows it. ` +
-                    `Wait for an assignment from the Team Lead. ` +
+                    `these messaging rules even if the tool allows it. The Team ` +
+                    `Lead may assign to any member regardless of hierarchy; ` +
+                    `Domain Leads may assign only within their domain; other ` +
+                    `agents MUST NOT assign work. Wait for assignments from ` +
+                    `${assignmentSources}. ` +
                     `Team roster: ${rosterSummary}. ` +
                     `Your direct communication contacts are: ${contactSummary}. ` +
                     `Your domains: ${JSON.stringify(domains)}. ` +
@@ -1180,6 +1212,10 @@ export default Plugin.define({
         execute: async (raw, toolContext) => {
           const input = raw as { to: string; message: string }
           const sender = await session.get({ sessionID: toolContext.sessionID })
+          const teamContext = await findTeamContext(storage, session, sender)
+          const teamMember = teamContext?.team.teamMembers.find((member) =>
+            member.session.id === sender.id,
+          )
           let recipientID: string
 
           if (input.to === "parent") {
@@ -1196,7 +1232,9 @@ export default Plugin.define({
 
           await session.prompt({
             sessionID: recipientID,
-            text: `${agentLabel(sender.title)}:\n${input.message}`,
+            text: `${agentLabel(teamMember
+              ? `${teamMember.acronym} — ${teamMember.name}`
+              : sender.title)}:\n${input.message}`,
           })
           return result(
             `Prompt submitted to ${input.to}; this is a transport receipt only, ` +

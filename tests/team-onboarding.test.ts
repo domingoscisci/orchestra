@@ -225,6 +225,8 @@ describe("Orchestra team setup smoke tests", () => {
     })
     const childIDs = [...sessions.keys()].filter((id) => id !== "main")
     expect(childIDs).toHaveLength(2)
+    expect(sessions.get("child-1")).toMatchObject({ title: "Review", parentID: "main" })
+    expect(sessions.get("child-2")).toMatchObject({ title: "Dev", parentID: "child-1" })
     const team = storage.get(teamKey()) as any
     expect(team.domains).toHaveLength(1)
     expect(team.teamMembers.map((member: any) => member.acronym)).toEqual(["TL", "D", "R"])
@@ -232,16 +234,19 @@ describe("Orchestra team setup smoke tests", () => {
       team.teamMembers[1].id,
       team.teamMembers[2].id,
     ])
-    expect(prompts.get(childIDs[0])).toContain("MUST message only their immediate parent")
-    expect(prompts.get(childIDs[0])).toContain("relay across branches through the hierarchy")
-    expect(prompts.get(childIDs[0])).not.toContain("INV-B03")
-    expect(prompts.get(childIDs[0])).toContain("Team roster: TL: Team Lead")
-    expect(prompts.get(childIDs[0])).toContain("direct communication contacts are: TL: Team Lead")
+    expect(prompts.get("child-2")).toContain("MUST message only their immediate parent")
+    expect(prompts.get("child-2")).toContain("relay across branches through the hierarchy")
+    expect(prompts.get("child-2")).not.toContain("INV-B03")
+    expect(prompts.get("child-2")).toContain("Team roster: TL: Team Lead")
+    expect(prompts.get("child-2")).toContain("direct communication contacts are: R: Review")
+    expect(prompts.get("child-2")).toContain("Wait for assignments from the Team Lead or Domain Lead Review")
     const guide = await readFile(teamGuidePath(), "utf8")
     expect(guide).toContain("**D — Dev** — developer: Implements changes.")
     expect(guide).toContain("**R — Review** — reviewer: Reviews changes.")
-    expect(guide).toContain("  - **D — Dev** (developer)\n  - **R — Review** (reviewer)")
+    expect(guide).toContain("  - **R — Review** (reviewer)\n    - **D — Dev** (developer)")
     expect(guide).toContain("**Quality** — lead: R (Review); members: D (Dev), R (Review)")
+    expect(guide).toContain("roster member, regardless of hierarchy level.")
+    expect(guide).toContain("Assignment authority does not change the reporting hierarchy.")
     expect(events.indexOf(`create:${childIDs[1]}`)).toBeLessThan(events.indexOf(`switch:${lead}`))
     expect(sessions.get("main").agent).toBe(lead)
   })
@@ -355,13 +360,13 @@ describe("Orchestra team setup smoke tests", () => {
       ],
       domains,
     })
-    sessions.set("child-1", { ...sessions.get("child-1"), time: { busy: 20 } })
+    sessions.set("child-2", { ...sessions.get("child-2"), time: { busy: 20 } })
     await expect(tools.assign_task.execute({
       agent: "Dev",
       task: "Do not queue while busy",
     }, { sessionID: "main" })).rejects.toThrow("already working")
     expect((storage.get(teamKey()) as any).teamMembers[1].assignment).toBeUndefined()
-    sessions.set("child-1", { id: "child-1", parentID: "main", title: "Dev", directory })
+    sessions.set("child-2", { id: "child-2", parentID: "child-1", title: "Dev", directory })
     const first = await tools.assign_task.execute({
       agent: "Dev",
       task: "First task",
@@ -394,11 +399,11 @@ describe("Orchestra team setup smoke tests", () => {
     const result = await tools.assign_task.execute({
       agent: "Dev",
       task: "Domain work",
-    }, { sessionID: "child-2" })
+    }, { sessionID: "child-1" })
     expect(JSON.parse(result.content)).toMatchObject({ status: "pending_ack" })
   })
 
-  test("labels send_message as a transport receipt, not recipient acknowledgment", async () => {
+  test("labels team messages with roster names, not session titles", async () => {
     await activate({ roster: [{ name: "Dev", agent: "developer" }], domains: [] })
     const output = await tools.send_message.execute({
       to: "Dev",
@@ -407,7 +412,13 @@ describe("Orchestra team setup smoke tests", () => {
 
     expect(output.content).toContain("transport receipt only")
     expect(output.content).toContain("not confirmation")
+    expect(prompts.get("child-1")).toContain("TL — Team Lead")
+    expect(prompts.get("child-1")).not.toContain("Project")
     expect(prompts.get("child-1")).toContain("Implement the requested change")
+
+    await tools.send_message.execute({ to: "parent", message: "Done" }, { sessionID: "child-1" })
+    expect(prompts.get("main")).toContain("D — Dev")
+    expect(prompts.get("main")).not.toContain("child-1")
   })
 
   test("cancellation and child creation failure leave the main session unchanged", async () => {
