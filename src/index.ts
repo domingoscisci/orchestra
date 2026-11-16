@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin"
 import { randomUUID } from "node:crypto"
 import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { gzipSync } from "node:zlib"
 import {
   agentLabel,
   applySessionExecutionEvent,
@@ -9,8 +10,8 @@ import {
   canAssignTeamTask,
   createTeamAssignment,
   directChildren,
-  nextAcronym,
   pageSessions,
+  planTeamStructure,
   reportTeamAssignment,
   resolveChild,
   sessionStatus,
@@ -173,6 +174,46 @@ async function writeAtomicText(path: string, content: string) {
     await unlink(temporary).catch(() => undefined)
     throw error
   }
+}
+
+type TeamConfig = { lead: string; roster: TeamRosterEntry[]; domains: TeamDomain[] }
+
+function parseTeamConfig(text: string): TeamConfig {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error(
+      ".team.yml is malformed or uses unsupported YAML syntax. It must be a " +
+      "JSON-compatible YAML object; fix or remove it before /team setup.",
+    )
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(".team.yml must contain a JSON-compatible YAML object")
+  }
+  const config = value as Record<string, unknown>
+  if (Object.keys(config).sort().join(",") !== "domains,lead,roster" ||
+    typeof config.lead !== "string" || !config.lead.trim() ||
+    !Array.isArray(config.roster) || !Array.isArray(config.domains)) {
+    throw new Error(".team.yml must contain only lead, roster, and domains")
+  }
+  for (const member of config.roster) {
+    if (!member || typeof member !== "object" || Array.isArray(member) ||
+      Object.keys(member).sort().join(",") !== "agent,name" ||
+      typeof member.name !== "string" || typeof member.agent !== "string") {
+      throw new Error(".team.yml contains an invalid roster entry")
+    }
+  }
+  for (const domain of config.domains) {
+    if (!domain || typeof domain !== "object" || Array.isArray(domain) ||
+      Object.keys(domain).sort().join(",") !== "lead,members,name" ||
+      typeof domain.name !== "string" || typeof domain.lead !== "string" ||
+      !Array.isArray(domain.members) ||
+      domain.members.some((member) => typeof member !== "string")) {
+      throw new Error(".team.yml contains an invalid domain")
+    }
+  }
+  return config as TeamConfig
 }
 
 async function updateTeamGuides(
@@ -391,12 +432,12 @@ function createTeamDocument(
   createdAt = new Date().toISOString(),
 ): TeamDocument {
   const runId = randomUUID()
-  const usedAcronyms = new Set<string>()
+  const plan = planTeamStructure(leadRole, roster, domains)
   const leadMember = {
     id: randomUUID(),
     runId,
     name: "Team Lead",
-    acronym: "",
+    acronym: plan[0].acronym,
     role: leadRole,
     session: {
       id: current.id,
@@ -404,8 +445,6 @@ function createTeamDocument(
       updatedAt: createdAt,
     },
   }
-  leadMember.acronym = nextAcronym(leadMember.name, usedAcronyms)
-
   const members = [leadMember, ...roster.map((entry, index) => {
     const child = childSessions[index]
     const name = entry.name.trim()
@@ -413,7 +452,7 @@ function createTeamDocument(
       id: randomUUID(),
       runId,
       name,
-      acronym: nextAcronym(name, usedAcronyms),
+      acronym: plan[index + 1].acronym,
       role: entry.agent,
       session: {
         id: child.id,
@@ -681,8 +720,278 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "save_team",
+        description: "Save the active Orchestra team configuration to .team.yml.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: { overwrite: { type: "boolean" } },
+          additionalProperties: false,
+        },
+        execute: async (raw, toolContext) => {
+          const input = raw as { overwrite?: boolean }
+          const current = await session.get({ sessionID: toolContext.sessionID })
+          const context = await findTeamContext(storage, session, current)
+          if (!context) throw new Error("There is no active Orchestra team to save")
+          const { team } = context
+          const lead = team.teamMembers.find((member) =>
+            member.id === team.teamRun.leadMemberId,
+          )!
+          const byID = new Map(team.teamMembers.map((member) => [member.id, member]))
+          const config: TeamConfig = {
+            lead: lead.role,
+            roster: team.teamMembers.filter((member) => member.id !== lead.id)
+              .map(({ name, role }) => ({ name, agent: role })),
+            domains: team.domains.map((domain) => ({
+              name: domain.name,
+              lead: byID.get(domain.leadMemberId)!.name,
+              members: domain.memberIds.map((id) => byID.get(id)!.name),
+            })),
+          }
+          const projectDirectory = context.root.directory ?? directory
+          const path = join(projectDirectory, ".team.yml")
+          if (await readOptionalText(path) !== undefined && !input.overwrite) {
+            throw new Error(".team.yml already exists. Confirm overwrite and retry with overwrite: true.")
+          }
+          await writeAtomicText(path, `${JSON.stringify(config, null, 2)}\n`)
+          return result("Saved active Orchestra team configuration to .team.yml.")
+        },
+      })
+
+      editor.add({
+        name: "load_team",
+        description: "Read and validate the project .team.yml configuration.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: { forSetup: { type: "boolean" } },
+          additionalProperties: false,
+        },
+        execute: async (raw, toolContext) => {
+          const input = raw as { forSetup?: boolean }
+          const current = await session.get({ sessionID: toolContext.sessionID })
+          if (await findTeamContext(storage, session, current)) {
+            throw new Error("Close the active Orchestra team with /team done before loading")
+          }
+          const path = join(current.directory ?? directory, ".team.yml")
+          const teamGuideExists =
+            await readOptionalText(join(current.directory ?? directory, "TEAM.md")) !== undefined
+          const text = await readOptionalText(path)
+          if (text === undefined) {
+            return result(JSON.stringify({ exists: false, teamGuideExists }))
+          }
+          const config = parseTeamConfig(text)
+          const listed = await agents.list()
+          try {
+            validateTeamRoster(config.lead, config.roster, config.domains, listed.data)
+          } catch (error) {
+            if (!input.forSetup) throw error
+            return result(JSON.stringify({
+              exists: true,
+              teamGuideExists,
+              ...config,
+              resumeError: error instanceof Error ? error.message : String(error),
+            }))
+          }
+          return result(JSON.stringify({ exists: true, teamGuideExists, ...config }))
+        },
+      })
+
+      editor.add({
+        name: "team_setup_ui",
+        description: "Prepare one staged Orchestra team setup mockup page with live roles and configuration.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: {
+            stage: { type: "string", enum: ["agents", "domains", "approval"] },
+            solo: { type: "boolean" },
+            teamGuideMode: { type: "string", enum: ["overwrite", "append"] },
+            leadAgents: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", minLength: 1 },
+                  name: { type: "string", minLength: 1 },
+                  description: { type: "string" },
+                },
+                required: ["id", "name"],
+                additionalProperties: false,
+              },
+            },
+            rosterAgents: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", minLength: 1 },
+                  name: { type: "string", minLength: 1 },
+                  description: { type: "string" },
+                },
+                required: ["id", "name"],
+                additionalProperties: false,
+              },
+            },
+            preview: {
+              type: "object",
+              properties: {
+                members: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: { type: "string" },
+                      role: { type: "string" },
+                      acronym: { type: "string" },
+                      parent: { anyOf: [{ type: "string" }, { type: "null" }] },
+                    },
+                    required: ["name", "role", "acronym", "parent"],
+                    additionalProperties: true,
+                  },
+                },
+                domains: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: { type: "string" },
+                      lead: { type: "string" },
+                      members: { type: "array", items: { type: "string" } },
+                    },
+                    required: ["name", "lead", "members"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ["members", "domains"],
+              additionalProperties: false,
+            },
+            initialConfig: {
+              type: "object",
+              properties: {
+                lead: { type: "string", minLength: 1 },
+                roster: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: { type: "string", minLength: 1, maxLength: 80 },
+                      agent: { type: "string", minLength: 1 },
+                    },
+                    required: ["name", "agent"],
+                    additionalProperties: false,
+                  },
+                },
+                domains: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: { type: "string", minLength: 1 },
+                      lead: { type: "string", minLength: 1 },
+                      members: { type: "array", items: { type: "string", minLength: 1 } },
+                    },
+                    required: ["name", "lead", "members"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ["lead", "roster", "domains"],
+              additionalProperties: false,
+            },
+            teamGuideExists: { type: "boolean" },
+          },
+          required: ["leadAgents", "rosterAgents", "teamGuideExists"],
+          additionalProperties: false,
+        },
+        execute: async (raw) => {
+          const template = await readFile(
+            new URL("../design/team-setup-panel.html", import.meta.url),
+            "utf8",
+          )
+          const data = JSON.stringify(raw).replace(/[<>&\u2028\u2029]/g, (char) =>
+            `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+          )
+          const html = template.replace('{"demo":true}', data)
+          const compressed = gzipSync(html).toString("base64")
+          return result(
+            '<!doctype html><html><head><meta charset="utf-8"></head><body><script>' +
+            `const b=Uint8Array.from(atob("${compressed}"),c=>c.charCodeAt(0));` +
+            'new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream("gzip"))).text().then(h=>{' +
+            'const page=new DOMParser().parseFromString(h,"text/html");' +
+            'document.title=page.title;document.documentElement.lang=page.documentElement.lang;' +
+            'document.head.append(...[...page.head.querySelectorAll("style,meta[name=viewport]")].map(node=>node.cloneNode(true)));' +
+            'document.body.replaceChildren(...page.body.childNodes);' +
+            'for(const old of document.body.querySelectorAll("script:not([type])")){' +
+            'const script=document.createElement("script");script.textContent=old.textContent;old.replaceWith(script)}' +
+            '}).catch(()=>{document.body.textContent="Impossibile caricare la configurazione del team."})' +
+            '</script></body></html>',
+          )
+        },
+      })
+
+      editor.add({
+        name: "preview_team",
+        description: "Validate a proposed roster and return its exact acronyms and hierarchy before approval.",
+        options: { namespace: "orchestra", codemode: true },
+        input: {
+          type: "object",
+          properties: {
+            lead: { type: "string", minLength: 1 },
+            roster: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", minLength: 1, maxLength: 80 },
+                  agent: { type: "string", minLength: 1 },
+                },
+                required: ["name", "agent"],
+                additionalProperties: false,
+              },
+            },
+            domains: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", minLength: 1 },
+                  lead: { type: "string", minLength: 1 },
+                  members: { type: "array", items: { type: "string", minLength: 1 } },
+                },
+                required: ["name", "lead", "members"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["lead", "roster", "domains"],
+          additionalProperties: false,
+        },
+        execute: async (raw) => {
+          const input = raw as {
+            lead: string
+            roster: TeamRosterEntry[]
+            domains: TeamDomain[]
+          }
+          const listed = await agents.list()
+          validateTeamRoster(input.lead, input.roster, input.domains, listed.data)
+          const descriptions = new Map(listed.data.map((agent) =>
+            [agent.id, agent.description] as const,
+          ))
+          return result(JSON.stringify({
+            members: planTeamStructure(input.lead, input.roster, input.domains).map((member) => ({
+              ...member,
+              description: descriptions.get(member.role),
+            })),
+            domains: input.domains,
+          }))
+        },
+      })
+
+      editor.add({
         name: "activate_team",
-        description: "Create and activate the user-approved Orchestra team roster.",
+        description: "Create the explicitly approved Orchestra team; optionally save its configuration.",
         options: { namespace: "orchestra", codemode: true },
         input: {
           type: "object",
@@ -715,6 +1024,7 @@ export default Plugin.define({
             },
             approved: { type: "boolean" },
             teamGuideMode: { type: "string", enum: ["overwrite", "append"] },
+            saveConfig: { type: "boolean" },
           },
           required: ["lead", "roster", "domains", "approved"],
           additionalProperties: false,
@@ -726,6 +1036,7 @@ export default Plugin.define({
             domains: TeamDomain[]
             approved: boolean
             teamGuideMode?: "overwrite" | "append"
+            saveConfig?: boolean
           }
           if (!input.approved) throw new Error("Team activation requires explicit user approval")
 
@@ -758,6 +1069,13 @@ export default Plugin.define({
                 )
               }
 
+              const structure = new Map(planTeamStructure(
+                input.lead,
+                input.roster,
+                input.domains,
+              ).slice(1).map((member) => [
+                member.name.toLowerCase(), member,
+              ] as const))
               const createdByName = new Map<string, SessionInfo>()
               const orderedRoster = [
                 ...input.roster.filter((member) => input.domains.some((domain) =>
@@ -768,13 +1086,9 @@ export default Plugin.define({
                 )),
               ]
               for (const member of orderedRoster) {
-                const domain = input.domains.find((item) =>
-                  item.members.some((name) =>
-                    name.trim().toLowerCase() === member.name.trim().toLowerCase(),
-                  ),
-                )
-                const parent = domain && domain.lead.trim().toLowerCase() !== member.name.trim().toLowerCase()
-                  ? createdByName.get(domain.lead.trim().toLowerCase())
+                const parentName = structure.get(member.name.trim().toLowerCase())!.parent
+                const parent = parentName && parentName !== "Team Lead"
+                  ? createdByName.get(parentName.toLowerCase())
                   : undefined
                 const child = await session.create({
                   parentID: parent?.id ?? current.id,
@@ -855,6 +1169,23 @@ export default Plugin.define({
               )
               switchStarted = true
               await session.switchAgent({ sessionID: current.id, agent: input.lead })
+              if (input.saveConfig) {
+                const config: TeamConfig = {
+                  lead: input.lead,
+                  roster: input.roster.map(({ name, agent }) => ({
+                    name: name.trim(), agent,
+                  })),
+                  domains: input.domains.map((domain) => ({
+                    name: domain.name.trim(),
+                    lead: domain.lead.trim(),
+                    members: domain.members.map((name) => name.trim()),
+                  })),
+                }
+                await writeAtomicText(
+                  join(projectDirectory, ".team.yml"),
+                  `${JSON.stringify(config, null, 2)}\n`,
+                )
+              }
               return result(JSON.stringify({ active: true, team }))
             } catch (error) {
               const cleanupFailures: string[] = []

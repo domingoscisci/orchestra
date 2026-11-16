@@ -27,10 +27,16 @@ EOF
 cp "/path/to/orchestra/src/commands/team.md" .opencode/commands/team.md
 ```
 
-Restart OpenCode, then run `/team setup` to configure a team or `/team done` to
-close it. On setup, Orchestra creates `TEAM.md` and creates or updates
+Restart OpenCode, then run `/team setup` to configure a team, `/team save` to
+save an active roster, `/team load` to review a saved roster, or `/team done` to
+close the active team. Saved configuration lives in `.team.yml` at the project
+root and includes the lead role, participants, and domains, but no session
+state. Setup offers to reload this file before collecting a new roster. On
+setup, Orchestra creates `TEAM.md` and creates or updates
 `AGENTS.md` in the target project. If `TEAM.md` already exists, setup asks
-whether to overwrite it or append the Orchestra rules. Commit
+whether to overwrite it or append the Orchestra rules. After an approved setup,
+the latest configuration is saved to `.team.yml`; OpenChamber Render is used
+when available, with interactive questions as a fallback. Commit
 `.opencode/commands/team.md` to share the command with project collaborators.
 Team runtime state is stored in OpenCode's Orchestra plugin storage, keyed by
 the Team Lead session ID. Existing local JSON team state is not migrated.
@@ -49,10 +55,12 @@ cp "/path/to/orchestra/src/commands/team.md" \
   ~/.config/opencode/commands/team.md
 ```
 
-Restart OpenCode. The global `/team setup` and `/team done` commands use the
+Restart OpenCode. The global `/team setup`, `/team save`, `/team load`, and
+`/team done` commands use the
 globally loaded Orchestra plugin; team state uses the same plugin storage and
 Team Lead session keying as project installs. Setup writes the team guidance to
-the target project, not to the Orchestra plugin repository.
+the target project, not to the Orchestra plugin repository. An approved setup
+also saves the latest configuration to `.team.yml` in that project.
 
 ## Development
 

@@ -83,6 +83,33 @@ export function nextAcronym(name: string, used: Set<string>) {
   return acronym
 }
 
+export function planTeamStructure(
+  lead: string,
+  roster: TeamRosterEntry[],
+  domains: TeamDomain[],
+) {
+  const used = new Set<string>()
+  return [
+    { name: "Team Lead", role: lead, acronym: nextAcronym("Team Lead", used), parent: null },
+    ...roster.map((member) => {
+      const domain = domains.find((item) => item.members.some((name) =>
+        name.trim().toLowerCase() === member.name.trim().toLowerCase(),
+      ))
+      const domainLead = domain && roster.find((entry) =>
+        entry.name.trim().toLowerCase() === domain.lead.trim().toLowerCase(),
+      )?.name.trim()
+      return {
+        name: member.name.trim(),
+        role: member.agent,
+        acronym: nextAcronym(member.name, used),
+        parent: domainLead && domainLead.toLowerCase() !== member.name.trim().toLowerCase()
+          ? domainLead
+          : "Team Lead",
+      }
+    }),
+  ]
+}
+
 function invalidTeam(reason: string): never {
   throw new Error(`Invalid persisted Orchestra team: ${reason}`)
 }

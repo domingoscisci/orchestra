@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gunzipSync } from "node:zlib"
 
 mock.module("@opencode/plugin", () => ({
   Plugin: { define: (definition: unknown) => definition },
@@ -39,6 +40,7 @@ describe("Orchestra team setup smoke tests", () => {
   const teamKey = (mainSessionID = "main") => `team:${mainSessionID}`
   const teamGuidePath = () => join(directory, "TEAM.md")
   const agentGuidePath = () => join(directory, "AGENTS.md")
+  const teamConfigPath = () => join(directory, ".team.yml")
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "orchestra-team-test-"))
@@ -189,6 +191,151 @@ describe("Orchestra team setup smoke tests", () => {
       { phase: "verify" }, { sessionID: "main" },
     )).content)).toEqual({ survivedRestart: true, remove: true })
     expect(storage.size).toBe(0)
+  })
+
+  test("setup UI embeds live data safely and stays within the chat width", async () => {
+    const output = await tools.team_setup_ui.execute({
+      leadAgents: [{ id: "lead", name: "</script><img src=x>", description: "Lead" }],
+      rosterAgents: [{ id: "developer", name: "Developer", description: "Builds" }],
+      stage: "approval",
+      solo: false,
+      teamGuideMode: "append",
+      initialConfig: { lead: "lead", roster: [], domains: [] },
+      preview: {
+        members: [{ name: "Team Lead", role: "lead", acronym: "TL", parent: null }],
+        domains: [],
+      },
+      teamGuideExists: true,
+    }, { sessionID: "main" })
+    expect(output.content).toContain('DecompressionStream("gzip")')
+    expect(output.content).toContain("new DOMParser().parseFromString")
+    expect(output.content).toContain("document.body.replaceChildren")
+    expect(output.content).not.toContain("document.open()")
+    const compressed = output.content.match(/atob\("([^"]+)"\)/)?.[1]
+    expect(compressed).toBeDefined()
+    const html = gunzipSync(Buffer.from(compressed!, "base64")).toString()
+    expect(html).toContain("max-width:68rem")
+    expect(html).toContain('"teamGuideExists":true')
+    expect(html).toContain("\\u003c/script\\u003e\\u003cimg")
+    expect(html).not.toContain("</script><img")
+    expect(html).toContain("openchamber.submit(payload,'Team approvato')")
+    expect(html).toContain("var(--background")
+    expect(html).not.toContain("data-theme-switch")
+    expect(html).toContain("appearance:none")
+    expect(html).toContain("flex:0 0 2rem")
+    expect(html).toContain("function renderHierarchy")
+    expect(html).toContain("titleCase(role.name)")
+    expect(html).toContain("bootstrap.stage==='approval'")
+    expect(html).toContain("bootstrap.preview?.members")
+    expect(output.content.length).toBeLessThan(html.length / 2)
+  })
+
+  test("saves the active team configuration and requires overwrite approval", async () => {
+    await activate()
+    await tools.save_team.execute({}, { sessionID: "main" })
+    expect(JSON.parse(await readFile(teamConfigPath(), "utf8"))).toEqual({
+      lead,
+      roster,
+      domains,
+    })
+    await expect(tools.save_team.execute({}, { sessionID: "main" }))
+      .rejects.toThrow("already exists")
+    await tools.save_team.execute({ overwrite: true }, { sessionID: "main" })
+  })
+
+  test("setup saves the approved configuration only after activation", async () => {
+    await writeFile(teamConfigPath(), JSON.stringify({ lead: "old", roster: [], domains: [] }))
+    await activate({ saveConfig: true })
+    expect(JSON.parse(await readFile(teamConfigPath(), "utf8"))).toEqual({
+      lead,
+      roster,
+      domains,
+    })
+    expect(sessions.get("main").agent).toBe(lead)
+  })
+
+  test("preview matches the hierarchy and acronyms created on activation", async () => {
+    const input = {
+      lead,
+      roster,
+      domains: [{ name: "Quality", lead: "rEVIEW", members: ["dEV", "rEVIEW"] }],
+    }
+    const preview = JSON.parse((await tools.preview_team.execute({
+      ...input,
+    }, { sessionID: "main" })).content)
+    await activate(input)
+    const team = storage.get(teamKey()) as any
+    const actual = team.teamMembers.map((member: any) => ({
+      name: member.name,
+      role: member.role,
+      acronym: member.acronym,
+      parent: member.session.parentSessionId
+        ? team.teamMembers.find((parent: any) =>
+          parent.session.id === member.session.parentSessionId)?.name
+        : null,
+    }))
+    expect(preview.members.map(({ name, role, acronym, parent }: any) => ({
+      name, role, acronym, parent,
+    }))).toEqual(actual)
+  })
+
+  test("setup rolls back activation if saving the approved configuration fails", async () => {
+    await mkdir(teamConfigPath())
+    await expect(activate({ saveConfig: true })).rejects.toThrow()
+    expect([...sessions.keys()]).toEqual(["main"])
+    expect(sessions.get("main").agent).toBe("build")
+    expect(storage.has(teamKey())).toBe(false)
+    await expect(readFile(teamGuidePath(), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  test("failed activation preserves the previous saved configuration", async () => {
+    const previous = JSON.stringify({ lead: "old", roster: [], domains: [] })
+    await writeFile(teamConfigPath(), previous)
+    failSwitch = true
+    await expect(activate({ saveConfig: true })).rejects.toThrow("switch failed")
+    expect(await readFile(teamConfigPath(), "utf8")).toBe(previous)
+  })
+
+  test("loads and validates .team.yml without activating a team", async () => {
+    const missing = await tools.load_team.execute({}, { sessionID: "main" })
+    expect(JSON.parse(missing.content)).toEqual({ exists: false, teamGuideExists: false })
+    await writeFile(teamConfigPath(), JSON.stringify({ lead, roster, domains }))
+    await writeFile(teamGuidePath(), "Existing team guide\n")
+    const loaded = await tools.load_team.execute({}, { sessionID: "main" })
+    expect(JSON.parse(loaded.content)).toEqual({
+      exists: true,
+      teamGuideExists: true,
+      lead,
+      roster,
+      domains,
+    })
+    expect(storage.has(teamKey())).toBe(false)
+    await writeFile(teamConfigPath(), JSON.stringify({ lead: "missing", roster, domains }))
+    await expect(tools.load_team.execute({}, { sessionID: "main" }))
+      .rejects.toThrow("no longer available")
+    const stale = await tools.load_team.execute(
+      { forSetup: true },
+      { sessionID: "main" },
+    )
+    expect(JSON.parse(stale.content)).toMatchObject({
+      exists: true,
+      lead: "missing",
+      resumeError: expect.stringContaining("no longer available"),
+    })
+    expect(await readFile(teamConfigPath(), "utf8"))
+      .toBe(JSON.stringify({ lead: "missing", roster, domains }))
+    await writeFile(teamConfigPath(), "not valid YAML")
+    await expect(tools.load_team.execute({}, { sessionID: "main" }))
+      .rejects.toThrow(".team.yml is malformed or uses unsupported YAML syntax")
+  })
+
+  test("setup preflight refuses to resume configuration over an active team", async () => {
+    await activate()
+    const sessionsBefore = [...sessions.keys()]
+    await expect(tools.load_team.execute({}, { sessionID: "main" }))
+      .rejects.toThrow("Close the active Orchestra team with /team done")
+    expect([...sessions.keys()]).toEqual(sessionsBefore)
   })
 
   test("activates a solo Team Lead and closes it back to the original agent", async () => {
@@ -632,6 +779,12 @@ describe("Orchestra team setup smoke tests", () => {
     expect(teamGuide).not.toContain("INV-B03")
     expect(agentsGuide).toContain("TEAM.md")
     expect(commandGuide).toContain("Do not expose internal invariant codes")
+    expect(commandGuide).toContain("openchamber_render")
+    expect(commandGuide).toContain('stage: "agents"')
+    expect(commandGuide).toContain('stage: "domains"')
+    expect(commandGuide).toContain('stage: "approval"')
+    expect(commandGuide).toContain("use `question` to ask whether to append")
+    expect(commandGuide).toContain("orchestra.preview_team")
     expect(model).toContain("latest observed execution state")
     expect(model).toContain("last persisted status may be stale")
     expect(model).toContain("stored status alone does not")

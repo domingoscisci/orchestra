@@ -6,7 +6,8 @@
     ".": "./src/index.ts"
   },
   "files": [
-    "src"
+    "src",
+    "design/team-setup-panel.html"
   ],
   "scripts": {
     "test": "bun test"
