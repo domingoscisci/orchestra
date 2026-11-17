@@ -224,7 +224,7 @@ describe("Orchestra team setup smoke tests", () => {
       .rejects.toThrow("requires a selected lead and live roster roles")
     await expect(render({
       stage: "domains",
-      initialConfig: { lead, roster: [], domains: [] },
+      initialConfig: { lead: { name: "Lead", agent: lead }, roster: [], domains: [] },
     })).rejects.toThrow("requires the selected non-empty roster")
     await expect(render({
       stage: "approval",
@@ -262,7 +262,7 @@ describe("Orchestra team setup smoke tests", () => {
     const domainsPage = await render({
       stage: "domains",
       lead,
-      initialConfig: { lead, roster, domains: [] },
+      initialConfig: { lead: { name: "Lead", agent: lead }, roster, domains: [] },
     })
     expect(domainsPage.content).toContain("Lead must belong to the domain.")
     expect(domainsPage.content).toContain('"domains":[]')
@@ -299,7 +299,7 @@ describe("Orchestra team setup smoke tests", () => {
     await activate()
     await tools.save_team.execute({}, { sessionID: "main" })
     expect(JSON.parse(await readFile(teamConfigPath(), "utf8"))).toEqual({
-      lead,
+      lead: { name: "Lead", agent: lead },
       roster,
       domains,
     })
@@ -312,7 +312,7 @@ describe("Orchestra team setup smoke tests", () => {
     await writeFile(teamConfigPath(), JSON.stringify({ lead: "old", roster: [], domains: [] }))
     await activate({ saveConfig: true })
     expect(JSON.parse(await readFile(teamConfigPath(), "utf8"))).toEqual({
-      lead,
+      lead: { name: "Lead", agent: lead },
       roster,
       domains,
     })
@@ -371,7 +371,7 @@ describe("Orchestra team setup smoke tests", () => {
     expect(JSON.parse(loaded.content)).toEqual({
       exists: true,
       teamGuideExists: true,
-      lead,
+      lead: { name: "Lead", agent: lead },
       roster,
       domains,
     })
@@ -385,7 +385,7 @@ describe("Orchestra team setup smoke tests", () => {
     )
     expect(JSON.parse(stale.content)).toMatchObject({
       exists: true,
-      lead: "missing",
+      lead: { name: "missing", agent: "missing" },
       resumeError: expect.stringContaining("no longer available"),
     })
     expect(await readFile(teamConfigPath(), "utf8"))
@@ -437,7 +437,10 @@ describe("Orchestra team setup smoke tests", () => {
     })
     const childIDs = [...sessions.keys()].filter((id) => id !== "main")
     expect(childIDs).toHaveLength(2)
-    expect(sessions.get("child-1")).toMatchObject({ title: "Review", parentID: "main" })
+    expect(sessions.get("child-1")).toMatchObject({
+      title: "Review (Quality)",
+      parentID: "main",
+    })
     expect(sessions.get("child-2")).toMatchObject({ title: "Dev", parentID: "child-1" })
     const team = storage.get(teamKey()) as any
     expect(team.domains).toHaveLength(1)

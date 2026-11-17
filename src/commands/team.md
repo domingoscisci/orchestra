@@ -31,6 +31,8 @@ For `setup`:
    stays untouched unless the new setup is approved. On no, cancel setup. If
    the config is valid and exists, use `question` to ask whether to resume it;
    on yes retain its config as the starting roster/domains, on no start fresh.
+   The saved lead is an object with `name` and `agent`; pass `lead.agent` to
+   tools that require the lead role ID and preserve `lead.name` for display.
    A decline cancels setup.
 2. Call `orchestra.list_lead` and `orchestra.list_agent` for current OpenCode
    definitions. For every `team_setup_ui` call, detect the conversation

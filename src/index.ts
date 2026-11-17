@@ -175,7 +175,11 @@ async function writeAtomicText(path: string, content: string) {
   }
 }
 
-type TeamConfig = { lead: string; roster: TeamRosterEntry[]; domains: TeamDomain[] }
+type TeamConfig = {
+  lead: { name: string; agent: string }
+  roster: TeamRosterEntry[]
+  domains: TeamDomain[]
+}
 
 function parseTeamConfig(text: string): TeamConfig {
   let value: unknown
@@ -191,8 +195,14 @@ function parseTeamConfig(text: string): TeamConfig {
     throw new Error(".team.yml must contain a JSON-compatible YAML object")
   }
   const config = value as Record<string, unknown>
+  const lead = typeof config.lead === "string"
+    ? { name: config.lead, agent: config.lead }
+    : config.lead
   if (Object.keys(config).sort().join(",") !== "domains,lead,roster" ||
-    typeof config.lead !== "string" || !config.lead.trim() ||
+    !lead || typeof lead !== "object" || Array.isArray(lead) ||
+    Object.keys(lead).sort().join(",") !== "agent,name" ||
+    typeof lead.name !== "string" || !lead.name.trim() ||
+    typeof lead.agent !== "string" || !lead.agent.trim() ||
     !Array.isArray(config.roster) || !Array.isArray(config.domains)) {
     throw new Error(".team.yml must contain only lead, roster, and domains")
   }
@@ -212,7 +222,7 @@ function parseTeamConfig(text: string): TeamConfig {
       throw new Error(".team.yml contains an invalid domain")
     }
   }
-  return config as TeamConfig
+  return { ...config, lead } as TeamConfig
 }
 
 async function updateTeamGuides(
@@ -610,7 +620,7 @@ function teamSetupPage(input: TeamSetupPageInput) {
   }
 
   if (input.stage === "lead") {
-    const chosenLead = input.lead ?? input.initialConfig?.lead ?? ""
+    const chosenLead = input.lead ?? input.initialConfig?.lead.agent ?? ""
     const selectedSolo = input.solo ?? (input.initialConfig?.roster.length === 0)
     const options = leadAgents.map((agent) =>
       `<option value="${esc(agent.id)}" ${agent.id === chosenLead ? "selected" : ""}>${esc(agent.name)}${agent.description ? ` — ${esc(agent.description)}` : ""}</option>`,
@@ -902,9 +912,13 @@ export default Plugin.define({
           const lead = team.teamMembers.find((member) =>
             member.id === team.teamRun.leadMemberId,
           )!
+          const listed = await agents.list()
           const byID = new Map(team.teamMembers.map((member) => [member.id, member]))
           const config: TeamConfig = {
-            lead: lead.role,
+            lead: {
+              name: listed.data.find((agent) => agent.id === lead.role)?.name ?? lead.role,
+              agent: lead.role,
+            },
             roster: team.teamMembers.filter((member) => member.id !== lead.id)
               .map(({ name, role }) => ({ name, agent: role })),
             domains: team.domains.map((domain) => ({
@@ -947,8 +961,11 @@ export default Plugin.define({
           }
           const config = parseTeamConfig(text)
           const listed = await agents.list()
+          config.lead.name = listed.data.find((agent) =>
+            agent.id === config.lead.agent,
+          )?.name ?? config.lead.name
           try {
-            validateTeamRoster(config.lead, config.roster, config.domains, listed.data)
+            validateTeamRoster(config.lead.agent, config.roster, config.domains, listed.data)
           } catch (error) {
             if (!input.forSetup) throw error
             return result(JSON.stringify({
@@ -1265,6 +1282,9 @@ export default Plugin.define({
                   domain.lead.trim().toLowerCase() === member.name.trim().toLowerCase(),
                 )),
               ]
+              const domainByLead = new Map(input.domains.map((domain) => [
+                domain.lead.trim().toLowerCase(), domain.name.trim(),
+              ]))
               for (const member of orderedRoster) {
                 const parentName = structure.get(member.name.trim().toLowerCase())!.parent
                 const parent = parentName && parentName !== "Team Lead"
@@ -1272,7 +1292,9 @@ export default Plugin.define({
                   : undefined
                 const child = await session.create({
                   parentID: parent?.id ?? current.id,
-                  title: member.name.trim(),
+                  title: domainByLead.has(member.name.trim().toLowerCase())
+                    ? `${member.name.trim()} (${domainByLead.get(member.name.trim().toLowerCase())})`
+                    : member.name.trim(),
                   agent: member.agent,
                 })
                 created.push(child)
@@ -1351,7 +1373,11 @@ export default Plugin.define({
               await session.switchAgent({ sessionID: current.id, agent: input.lead })
               if (input.saveConfig) {
                 const config: TeamConfig = {
-                  lead: input.lead,
+                  lead: {
+                    name: listed.data.find((agent) => agent.id === input.lead)?.name ??
+                      input.lead,
+                    agent: input.lead,
+                  },
                   roster: input.roster.map(({ name, agent }) => ({
                     name: name.trim(), agent,
                   })),
