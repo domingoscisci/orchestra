@@ -33,39 +33,67 @@ For `setup`:
    on yes retain its config as the starting roster/domains, on no start fresh.
    A decline cancels setup.
 2. Call `orchestra.list_lead` and `orchestra.list_agent` for current OpenCode
-   definitions. Use `question` for two choices: the Team Lead from the live
-   lead list, and whether that lead works alone. If resuming a saved config,
-   show its current lead as context but still collect the user's explicit
-   choice. On solo, normalize roster and domains to empty and skip steps 3–4.
-3. For a non-solo team, call `orchestra.team_setup_ui` with `stage: "agents"`,
-   the live lead/roster lists, the chosen lead, `solo: false`, and the saved
-   roster if resuming. Pass the complete returned HTML string unchanged to
-   `openchamber_render` with `awaitAnswer: true`. This is a new request/page
-   using the project mockup for role selection and member names. Its
-   `Continua ai domini` button submits only the selected roster and lead;
-   `answered: false` cancels. If Render is unavailable, collect role choices
-   and each unique member name with `question`. Do not call Render with
-   explanatory text instead of the returned HTML.
-4. Use a second, new `team_setup_ui` request with `stage: "domains"` and the
-   roster returned in step 3. Pass its returned HTML unchanged to a new
-   `openchamber_render` call with `awaitAnswer: true`. Collect the domain names,
-   members, and Domain Leads; no domains is valid. If Render fails, collect the
-   same fields with `question`. A canceled page cancels setup.
+   definitions. For every `team_setup_ui` call, detect the conversation
+   language and provide its BCP 47 tag in `language`. Always put localized
+   `title` and `step` (`{step}` is replaced with the current number) in `copy`;
+   `description` is optional. Also provide these exact keys:
+   - `lead`: `leadLabel`, `leadPlaceholder`, `soloLabel`, `continue`,
+     `selectLeadError`, `leadSelected`
+   - `agents`: `continue`, `addMember`, `nameLabel`, `removeMember`,
+     `rosterError`, `rosterSelected`
+   - `domains`: `addDomain`, `continue`, `domainPlaceholder`, `removeDomain`,
+     `domainLead`, `leadPlaceholder`, `leadHint`, `domainError`,
+     `domainsSelected`
+   - `approval`: `domainLead`, `members`, `noDomains`, `guideAppend`,
+     `guideOverwrite`, `hierarchy`, `domains`, `approve`, `approved`
+   Translate agent descriptions for display; preserve IDs, configured names,
+   and proper names. Localize copy values and submission summaries; do not use
+   a fixed catalog.
+   If `team_setup_ui` or `openchamber_render` is unavailable, use `question`
+   for the complete setup. Call `orchestra.team_setup_ui` with `stage: "lead"`,
+   both live agent lists, and the saved config when resuming. Pass its complete
+   HTML result unchanged to `openchamber_render` by directly invoking the
+   `render.page` action with `html`, a localized `title`, and
+   `awaitAnswer: true`. Do not ask whether to invoke the renderer, and do not
+   treat uncertainty about the tool as unavailability; attempt the call. Only
+   use `question` if the direct tool call is unavailable or returns an error.
+   The page collects the Team Lead and solo choice. A canceled page cancels
+   setup.
+3. Unless solo was selected, call `orchestra.team_setup_ui` with
+   `stage: "agents"`, the live roster list, chosen lead, `solo: false`, the
+   saved config when resuming, and localized `language` and `copy`. Pass the
+   returned HTML unchanged in a direct `render.page` call to
+   `openchamber_render`, with a localized `title` and `awaitAnswer: true`. The
+   page collects roles,
+   member names, and repeated members per role; its plus/minus controls do not
+   submit until the user continues. If Render fails, collect the same roster
+   with `question`. A canceled page cancels setup.
+4. Unless solo was selected, call `orchestra.team_setup_ui` with
+   `stage: "domains"`, the selected roster/config, and localized `language` and
+   `copy`. Pass the returned HTML unchanged in a direct `render.page` call to
+   `openchamber_render`, with a localized `title` and `awaitAnswer: true`.
+   Collect
+   domain names, members, and Domain Leads; no domains is valid. If Render
+   fails, collect the same fields with `question`. A canceled page cancels
+   setup.
 5. If `TEAM.md` already exists, use `question` to ask whether to append the
    Orchestra rules or overwrite the file. Do not include this choice in either
    roster/domain page. If it does not exist, omit `teamGuideMode`.
 6. Normalize solo mode to empty `roster` and `domains`, then call
    `orchestra.preview_team` with `lead`, `roster`, and `domains`. It validates
    current roles and returns the exact member names, roles, acronyms, parent
-   hierarchy, and domains. Call `orchestra.team_setup_ui` a third time with
-   `stage: "approval"`, the final config, `teamGuideExists`, the chosen
-   `teamGuideMode` when applicable, and that exact preview. Pass the returned
-   HTML unchanged to a new `openchamber_render` call with `awaitAnswer: true`.
-   Its final page shows the hierarchy and domains and has the only approval
-   button; approval submits `approved: true` and the displayed preview. If
-   Render fails, show the same preview and use `question` for explicit final
-   approval. A decline/cancel changes nothing. If preview validation fails,
-   explain the error and correct the config before asking again.
+   hierarchy, and domains. Call `orchestra.team_setup_ui` with
+   `stage: "approval"`, the final config, `teamGuideExists` (true or false), the chosen
+   `teamGuideMode` when applicable, that exact preview, and localized
+   `language` and `copy`. Pass the returned HTML unchanged in a direct
+   `render.page` call to `openchamber_render`, with a localized `title` and
+   `awaitAnswer: true`.
+   This is the final step even for solo teams. Its page shows the hierarchy and
+   domains and has the only approval button; approval submits `approved: true`
+   and the displayed preview. If Render fails, show the same preview and use
+   `question` for explicit final approval. A decline/cancel changes nothing. If
+   preview validation fails, explain the error and correct the config before
+   asking again.
 7. Only after explicit final approval, call `orchestra.activate_team` with the
    exact approved `lead`, `roster`, `domains`, `teamGuideMode` when needed,
    `approved: true`, and `saveConfig: true`. If activation or saving fails,

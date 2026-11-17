@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { gunzipSync } from "node:zlib"
 
 mock.module("@opencode/plugin", () => ({
   Plugin: { define: (definition: unknown) => definition },
@@ -193,41 +192,107 @@ describe("Orchestra team setup smoke tests", () => {
     expect(storage.size).toBe(0)
   })
 
-  test("setup UI embeds live data safely and stays within the chat width", async () => {
-    const output = await tools.team_setup_ui.execute({
-      leadAgents: [{ id: "lead", name: "</script><img src=x>", description: "Lead" }],
-      rosterAgents: [{ id: "developer", name: "Developer", description: "Builds" }],
+  test("setup UI returns self-contained HTML for all four live-data stages", async () => {
+    const copy = {
+      title: "Team setup", description: "Configure the team.", step: "Step {step} of 4",
+      leadLabel: "Team Lead", leadPlaceholder: "Choose an agent", soloLabel: "Work alone",
+      continue: "Continue", selectLeadError: "Choose a Team Lead.", leadSelected: "Lead selected",
+      addMember: "Add", nameLabel: "Agent name", removeMember: "Remove",
+      rosterError: "Enter unique member names.", rosterSelected: "Roster selected",
+      addDomain: "Add domain", domainPlaceholder: "Domain name", removeDomain: "Remove",
+      domainLead: "Domain Lead", leadHint: "Lead must belong to the domain.",
+      domainError: "Complete each domain.", domainsSelected: "Domains configured",
+      members: "Members", noDomains: "No domains", guideAppend: "Append rules",
+      guideOverwrite: "Replace content", hierarchy: "Hierarchy", domains: "Domains",
+      approve: "Approve and start", approved: "Team approved",
+    }
+    const common = {
+      language: "en-GB",
+      copy,
+      leadAgents: [{ id: "lead", name: "Lead", description: "Coordinates." }],
+      rosterAgents: [
+        { id: "developer", name: "Developer", description: "</script><img src=x>" },
+      ],
+      teamGuideExists: true,
+    }
+    const render = (input: Record<string, unknown>) =>
+      tools.team_setup_ui.execute({ ...common, ...input }, { sessionID: "main" })
+
+    await expect(render({ stage: "lead", leadAgents: [] }))
+      .rejects.toThrow("requires live lead agent definitions")
+    await expect(render({ stage: "agents", lead, rosterAgents: [] }))
+      .rejects.toThrow("requires a selected lead and live roster roles")
+    await expect(render({
+      stage: "domains",
+      initialConfig: { lead, roster: [], domains: [] },
+    })).rejects.toThrow("requires the selected non-empty roster")
+    await expect(render({
       stage: "approval",
+      teamGuideExists: true,
+      teamGuideMode: undefined,
+      preview: { members: [], domains: [] },
+    })).rejects.toThrow("requires the existing TEAM.md choice")
+
+    const leadPage = await render({ stage: "lead" })
+    expect(leadPage.content).toMatch(/^<!doctype html>/)
+    expect(leadPage.content).toContain('<html lang="en-GB">')
+    expect(leadPage.content).toContain("Work alone")
+    expect(leadPage.content).toContain("Step 1 of 4")
+    const copyWithoutDescription = Object.fromEntries(
+      Object.entries(copy).filter(([key]) => key !== "description"),
+    )
+    const withoutDescription = await tools.team_setup_ui.execute({
+      ...common,
+      copy: copyWithoutDescription,
+      stage: "lead",
+    }, { sessionID: "main" })
+    expect(withoutDescription.content).not.toContain("<p>Configure the team.</p>")
+
+    const agentsPage = await render({
+      stage: "agents",
+      lead,
       solo: false,
-      teamGuideMode: "append",
-      initialConfig: { lead: "lead", roster: [], domains: [] },
+    })
+    expect(agentsPage.content).toContain("data-add")
+    expect(agentsPage.content).toContain("data-remove")
+    expect(agentsPage.content).toContain("a.length===1?n:n+")
+    expect(agentsPage.content).toContain("\\u003c/script\\u003e\\u003cimg")
+    expect(agentsPage.content).not.toContain("</script><img")
+
+    const domainsPage = await render({
+      stage: "domains",
+      lead,
+      initialConfig: { lead, roster, domains: [] },
+    })
+    expect(domainsPage.content).toContain("Lead must belong to the domain.")
+    expect(domainsPage.content).toContain('"domains":[]')
+    expect(domainsPage.content).toContain('e.value===""?-1:+e.value')
+
+    const approvalPage = await render({
+      stage: "approval",
+      lead,
       preview: {
-        members: [{ name: "Team Lead", role: "lead", acronym: "TL", parent: null }],
+        members: [
+          { name: "Team Lead", role: "lead", acronym: "TL", parent: null },
+          { name: "Dev", role: "developer_tools", acronym: "D", parent: "Team Lead" },
+        ],
         domains: [],
       },
-      teamGuideExists: true,
-    }, { sessionID: "main" })
-    expect(output.content).toContain('DecompressionStream("gzip")')
-    expect(output.content).toContain("new DOMParser().parseFromString")
-    expect(output.content).toContain("document.body.replaceChildren")
-    expect(output.content).not.toContain("document.open()")
-    const compressed = output.content.match(/atob\("([^"]+)"\)/)?.[1]
-    expect(compressed).toBeDefined()
-    const html = gunzipSync(Buffer.from(compressed!, "base64")).toString()
-    expect(html).toContain("max-width:68rem")
-    expect(html).toContain('"teamGuideExists":true')
-    expect(html).toContain("\\u003c/script\\u003e\\u003cimg")
-    expect(html).not.toContain("</script><img")
-    expect(html).toContain("openchamber.submit(payload,'Team approvato')")
-    expect(html).toContain("var(--background")
-    expect(html).not.toContain("data-theme-switch")
-    expect(html).toContain("appearance:none")
-    expect(html).toContain("flex:0 0 2rem")
-    expect(html).toContain("function renderHierarchy")
-    expect(html).toContain("titleCase(role.name)")
-    expect(html).toContain("bootstrap.stage==='approval'")
-    expect(html).toContain("bootstrap.preview?.members")
-    expect(output.content.length).toBeLessThan(html.length / 2)
+      teamGuideMode: "append",
+    })
+    expect(approvalPage.content).toContain("Approve and start")
+    expect(approvalPage.content).toContain("Developer Tools")
+    expect(approvalPage.content).not.toContain("Implements changes.")
+    expect(approvalPage.content).toContain("openchamber.submit({approved:true,preview:d.preview}")
+
+    for (const output of [leadPage, agentsPage, domainsPage, approvalPage]) {
+      expect(output.content).not.toContain("gzip")
+      expect(output.content).not.toContain("DecompressionStream")
+      expect(output.content).not.toContain("team-setup-panel.html")
+      const scripts = [...output.content.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+      expect(scripts).toHaveLength(1)
+      expect(() => new Function(scripts[0][1])).not.toThrow()
+    }
   })
 
   test("saves the active team configuration and requires overwrite approval", async () => {
@@ -780,6 +845,7 @@ describe("Orchestra team setup smoke tests", () => {
     expect(agentsGuide).toContain("TEAM.md")
     expect(commandGuide).toContain("Do not expose internal invariant codes")
     expect(commandGuide).toContain("openchamber_render")
+    expect(commandGuide).toContain('stage: "lead"')
     expect(commandGuide).toContain('stage: "agents"')
     expect(commandGuide).toContain('stage: "domains"')
     expect(commandGuide).toContain('stage: "approval"')

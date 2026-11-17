@@ -2,7 +2,6 @@ import { Plugin } from "@opencode/plugin"
 import { randomUUID } from "node:crypto"
 import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { gzipSync } from "node:zlib"
 import {
   agentLabel,
   applySessionExecutionEvent,
@@ -515,6 +514,172 @@ function result(content: string) {
   return { content }
 }
 
+const teamSetupStyle = `
+body{margin:0;padding:1rem;color:var(--foreground);font:16px system-ui,sans-serif}
+main{max-width:44rem;margin:auto}.step,.muted,.hint{color:var(--muted-foreground);font-size:.82rem}
+h1{font-size:1.3rem;margin:.2rem 0 .4rem}p{margin:.4rem 0 .8rem}
+.card{padding:.75rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);margin:.55rem 0}
+.row{display:flex;align-items:center;gap:.5rem}.row label{flex:1}
+.members,.choices{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.65rem}
+.member,.choice{display:flex;align-items:center;gap:.35rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--background)}
+input[type=text],select{min-width:0;padding:.5rem .6rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--background);color:var(--foreground);font:inherit}
+.member input[type=text]{flex:1}.field{display:grid;gap:.25rem}.icon,.button{padding:.5rem .7rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font:inherit;cursor:pointer}
+.icon{width:2rem;height:2rem;padding:0;font-size:1.2rem}.primary{border-color:var(--primary);background:var(--primary);color:var(--primary-foreground);font-weight:600}
+.actions{display:flex;justify-content:flex-end;margin-top:.85rem}.status{color:var(--destructive);font-size:.82rem}
+.tree{margin:.4rem 0 0 .9rem;padding-left:.8rem;border-left:1px solid var(--border)}.tree .tree{margin-left:.5rem}
+.role{display:block;margin-top:.12rem;color:var(--muted-foreground);font-size:.8rem}
+`
+
+type TeamSetupPageInput = {
+  stage: "lead" | "agents" | "domains" | "approval"
+  language: string
+  copy: Record<string, string>
+  lead?: string
+  solo?: boolean
+  leadAgents?: Array<Pick<AgentInfo, "id" | "name" | "description">>
+  rosterAgents?: Array<Pick<AgentInfo, "id" | "name" | "description">>
+  initialConfig?: TeamConfig
+  preview?: {
+    members: Array<{ name: string; role: string; acronym: string; parent: string | null }>
+    domains: Array<{ name: string; lead: string; members: string[] }>
+  }
+  teamGuideExists?: boolean
+  teamGuideMode?: "overwrite" | "append"
+}
+
+function teamSetupPage(input: TeamSetupPageInput) {
+  const leadAgents = input.leadAgents ?? []
+  const rosterAgents = input.rosterAgents ?? []
+  if (input.stage === "lead" && !leadAgents.length) {
+    throw new Error("Lead stage requires live lead agent definitions")
+  }
+  if (input.stage === "agents" && (!input.lead || !rosterAgents.length)) {
+    throw new Error("Agents stage requires a selected lead and live roster roles")
+  }
+  if (input.stage === "domains" && !input.initialConfig?.roster.length) {
+    throw new Error("Domains stage requires the selected non-empty roster")
+  }
+  if (input.stage === "approval" && input.teamGuideExists && !input.teamGuideMode) {
+    throw new Error("Approval stage requires the existing TEAM.md choice")
+  }
+  const required = [
+    "title", "step",
+    ...(input.stage === "lead" ? [
+      "leadLabel", "leadPlaceholder", "soloLabel", "continue",
+      "selectLeadError", "leadSelected",
+    ] : input.stage === "agents" ? [
+      "continue", "addMember", "nameLabel", "removeMember",
+      "rosterError", "rosterSelected",
+    ] : input.stage === "domains" ? [
+      "addDomain", "continue", "domainPlaceholder", "removeDomain",
+      "domainLead", "leadPlaceholder", "leadHint", "domainError",
+      "domainsSelected",
+    ] : [
+      "domainLead", "members", "noDomains", "guideAppend",
+      "guideOverwrite", "hierarchy", "domains", "approve", "approved",
+    ]),
+  ]
+  for (const key of required) {
+    if (!input.copy[key]) throw new Error(`Missing localized setup text: ${key}`)
+  }
+  const text = (key: string) => {
+    const value = input.copy[key]
+    if (!value) throw new Error(`Missing localized setup text: ${key}`)
+    return value
+  }
+  const esc = (value: unknown) => String(value).replace(/[&<>"']/g, (char) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!,
+  )
+  const page = (
+    step: number,
+    body: string,
+    script: string,
+    data: unknown = input,
+  ) => {
+    const safeJson = JSON.stringify({
+      ...data as object,
+      language: input.language,
+      copy: input.copy,
+    }).replace(/[<>&\u2028\u2029]/g, (char) =>
+      `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    )
+    const description = input.copy.description
+      ? `<p>${esc(input.copy.description)}</p>`
+      : ""
+    return `<!doctype html><html lang="${esc(input.language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(text("title"))}</title><style>${teamSetupStyle}</style></head><body><main><p class="step">${esc(text("step").replace("{step}", String(step)))}</p><h1>${esc(text("title"))}</h1>${description}${body}<p class="status" id="status" aria-live="polite"></p></main><script id="data" type="application/json">${safeJson}</script><script>const d=JSON.parse(document.querySelector("#data").textContent);const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));${script}</script></body></html>`
+  }
+
+  if (input.stage === "lead") {
+    const chosenLead = input.lead ?? input.initialConfig?.lead ?? ""
+    const selectedSolo = input.solo ?? (input.initialConfig?.roster.length === 0)
+    const options = leadAgents.map((agent) =>
+      `<option value="${esc(agent.id)}" ${agent.id === chosenLead ? "selected" : ""}>${esc(agent.name)}${agent.description ? ` — ${esc(agent.description)}` : ""}</option>`,
+    ).join("")
+    return page(1,
+      `<label class="field">${esc(text("leadLabel"))}<select id="lead"><option value="">${esc(text("leadPlaceholder"))}</option>${options}</select></label><label class="choice"><input id="solo" type="checkbox" ${selectedSolo ? "checked" : ""}> ${esc(text("soloLabel"))}</label><div class="actions"><button class="button primary" id="continue">${esc(text("continue"))}</button></div>`,
+      `document.querySelector("#continue").onclick=async()=>{const lead=document.querySelector("#lead").value;if(!lead){document.querySelector("#status").textContent=d.copy.selectLeadError;return}const button=document.querySelector("#continue");button.disabled=true;try{await openchamber.submit({lead,solo:document.querySelector("#solo").checked},d.copy.leadSelected)}catch{button.disabled=false}};`,
+      { leadAgents, lead: chosenLead, solo: selectedSolo },
+    )
+  }
+
+  if (input.stage === "agents") {
+    return page(2,
+      `<div id="roles"></div><div class="actions"><button class="button primary" id="continue">${esc(text("continue"))}</button></div>`,
+      `const title=id=>id.replace(/([a-z\\d])([A-Z])/g,"$1 $2").replace(/[_-]+/g," ").toLocaleLowerCase().replace(/(^|\\s)(\\p{L})/gu,(_,a,b)=>a+b.toLocaleUpperCase());const state=Object.fromEntries(d.rosterAgents.map(r=>[r.id,{role:r,members:(d.initialConfig?.roster||[]).filter(m=>m.agent===r.id).map(m=>({name:m.name,custom:true}))}]));function sync(id){const a=state[id].members,n=title(id);a.forEach((m,i)=>{if(!m.custom)m.name=a.length===1?n:n+" "+(i+1)})}function draw(){const root=document.querySelector("#roles");root.innerHTML=d.rosterAgents.map(r=>{const a=state[r.id].members;return '<section class="card"><div class="row"><input type="checkbox" data-role="'+esc(r.id)+'" '+(a.length?"checked":"")+'><label><strong>'+esc(title(r.id))+'</strong><span class="role">'+esc(r.description||"")+'</span></label><button class="icon" aria-label="'+esc(d.copy.addMember)+' '+esc(title(r.id))+'" data-add="'+esc(r.id)+'" '+(a.length?"":"disabled")+'>+</button></div>'+a.map((m,i)=>'<div class="row members"><input type="text" maxlength="80" aria-label="'+esc(d.copy.nameLabel)+'" data-name="'+esc(r.id)+'" data-index="'+i+'" value="'+esc(m.name)+'"><button class="icon" aria-label="'+esc(d.copy.removeMember)+' '+esc(m.name)+'" data-remove="'+esc(r.id)+'" data-index="'+i+'">−</button></div>').join("")+'</section>'}).join("");root.querySelectorAll("[data-role]").forEach(e=>e.onchange=()=>{const a=state[e.dataset.role].members;if(e.checked){a.push({name:"",custom:false});sync(e.dataset.role)}else state[e.dataset.role].members=[];draw()});root.querySelectorAll("[data-add]").forEach(e=>e.onclick=()=>{state[e.dataset.add].members.push({name:"",custom:false});sync(e.dataset.add);draw()});root.querySelectorAll("[data-remove]").forEach(e=>e.onclick=()=>{const a=state[e.dataset.remove].members;a.splice(+e.dataset.index,1);sync(e.dataset.remove);draw()});root.querySelectorAll("[data-name]").forEach(e=>e.oninput=()=>{const m=state[e.dataset.name].members[+e.dataset.index];m.name=e.value;m.custom=true})}draw();document.querySelector("#continue").onclick=async()=>{const roster=Object.values(state).flatMap(x=>x.members.map(m=>({name:m.name.trim(),agent:x.role.id})));const names=roster.map(m=>m.name.toLowerCase());if(!roster.length||roster.some(m=>!m.name)||new Set(names).size!==names.length){document.querySelector("#status").textContent=d.copy.rosterError;return}const button=document.querySelector("#continue");button.disabled=true;try{await openchamber.submit({lead:d.lead,solo:false,roster},d.copy.rosterSelected)}catch{button.disabled=false}};`,
+      { lead: input.lead, rosterAgents, initialConfig: input.initialConfig },
+    )
+  }
+
+  if (input.stage === "domains") {
+    return page(3,
+      `<div id="domains"></div><button class="button" id="add">${esc(text("addDomain"))}</button><div class="actions"><button class="button primary" id="continue">${esc(text("continue"))}</button></div>`,
+      `const people=d.initialConfig?.roster||[];let seq=0;const domains=(d.initialConfig?.domains||[]).map(x=>({id:"d"+seq++,name:x.name,members:x.members.map(n=>people.findIndex(p=>p.name.toLowerCase()===n.toLowerCase())).filter(i=>i>=0),lead:people.findIndex(p=>p.name.toLowerCase()===x.lead.toLowerCase())}));const used=()=>new Set(domains.flatMap(x=>x.members));function draw(){const root=document.querySelector("#domains");root.innerHTML=domains.map(x=>{const taken=used(),members=people.map((p,j)=>({p,j})).filter(({j})=>!taken.has(j)||x.members.includes(j));return '<section class="card"><div class="row"><input type="text" data-name="'+x.id+'" value="'+esc(x.name)+'" placeholder="'+esc(d.copy.domainPlaceholder)+'"><button class="button" data-remove="'+x.id+'">'+esc(d.copy.removeDomain)+'</button></div><div class="members">'+members.map(({p,j})=>'<label class="member"><input type="checkbox" data-member="'+x.id+'" data-id="'+j+'" '+(x.members.includes(j)?"checked":"")+'> '+esc(p.name)+'</label>').join("")+'</div><label class="field">'+esc(d.copy.domainLead)+'<select data-lead="'+x.id+'" '+(x.members.length?"":"disabled")+'><option value="">'+esc(d.copy.leadPlaceholder)+'</option>'+x.members.map(j=>'<option value="'+j+'" '+(x.lead===j?"selected":"")+'>'+esc(people[j].name)+'</option>').join("")+'</select><span class="hint">'+esc(d.copy.leadHint)+'</span></label></section>'}).join("");root.querySelectorAll("[data-name]").forEach(e=>e.oninput=()=>{domains.find(x=>x.id===e.dataset.name).name=e.value;validate()});root.querySelectorAll("[data-member]").forEach(e=>e.onchange=()=>{const x=domains.find(x=>x.id===e.dataset.member),id=+e.dataset.id;if(e.checked)x.members.push(id);else{x.members=x.members.filter(i=>i!==id);if(x.lead===id)x.lead=-1}draw();validate()});root.querySelectorAll("[data-lead]").forEach(e=>e.onchange=()=>{domains.find(x=>x.id===e.dataset.lead).lead=e.value===""?-1:+e.value;validate()});root.querySelectorAll("[data-remove]").forEach(e=>e.onclick=()=>{domains.splice(domains.findIndex(x=>x.id===e.dataset.remove),1);draw();validate()});validate()}function validate(){const bad=domains.some(x=>!x.name.trim()||!x.members.length||!x.members.includes(x.lead));document.querySelector("#continue").disabled=bad;document.querySelector("#status").textContent=bad?d.copy.domainError:""}document.querySelector("#add").onclick=()=>{domains.push({id:"d"+seq++,name:"",members:[],lead:-1});draw();document.querySelector("#domains .card:last-child [data-name]")?.focus()};document.querySelector("#continue").onclick=async()=>{if(document.querySelector("#continue").disabled)return;const value=domains.map(x=>({name:x.name.trim(),lead:people[x.lead].name,members:x.members.map(i=>people[i].name)}));const button=document.querySelector("#continue");button.disabled=true;try{await openchamber.submit({domains:value},d.copy.domainsSelected)}catch{button.disabled=false}};draw();`,
+      { initialConfig: input.initialConfig },
+    )
+  }
+
+  if (!input.preview) throw new Error("Approval stage requires a validated team preview")
+  const preview = input.preview
+  const agentName = (id: string) => {
+    return id.replace(/([a-z\d])([A-Z])/g, "$1 $2")
+      .replace(/[_-]+/g, " ")
+      .toLocaleLowerCase(input.language)
+      .replace(/(^|\s)(\p{L})/gu, (_, space, letter) =>
+        space + letter.toLocaleUpperCase(input.language))
+  }
+  type PreviewNode = typeof preview.members[number] & { children: PreviewNode[] }
+  const byName = new Map<string, PreviewNode>(preview.members.map((member) =>
+    [member.name.toLowerCase(), { ...member, children: [] }] as const,
+  ))
+  const roots: PreviewNode[] = []
+  for (const member of byName.values()) {
+    const parent = member.parent ? byName.get(member.parent.toLowerCase()) : undefined
+    if (parent) parent.children.push(member)
+    else roots.push(member)
+  }
+  const renderTree = (members: PreviewNode[]): string => members.map((member) =>
+    `<li><strong>${esc(member.acronym)} · ${esc(member.name)}</strong><span class="role">${esc(agentName(member.role))}</span>${member.children.length ? `<ul class="tree">${renderTree(member.children)}</ul>` : ""}</li>`,
+  ).join("")
+  const domains = preview.domains.length
+    ? `<ul>${preview.domains.map((domain) => `<li><strong>${esc(domain.name)}</strong><span class="role">${esc(text("domainLead"))}: ${esc(domain.lead)} · ${esc(text("members"))}: ${domain.members.map(esc).join(", ")}</span></li>`).join("")}</ul>`
+    : `<p class="muted">${esc(text("noDomains"))}</p>`
+  const guide = input.teamGuideExists
+    ? `<p class="hint">TEAM.md: ${esc(text(input.teamGuideMode === "append" ? "guideAppend" : "guideOverwrite"))}.</p>`
+    : ""
+  return page(4,
+    `<section class="card"><strong>${esc(text("hierarchy"))}</strong><ul class="tree">${renderTree(roots)}</ul></section><section class="card"><strong>${esc(text("domains"))}</strong>${domains}</section>${guide}<div class="actions"><button class="button primary" id="approve">${esc(text("approve"))}</button></div>`,
+    `document.querySelector("#approve").onclick=async()=>{const button=document.querySelector("#approve");button.disabled=true;try{await openchamber.submit({approved:true,preview:d.preview},d.copy.approved)}catch{button.disabled=false}};`,
+    {
+      lead: input.lead,
+      leadAgents: leadAgents.map(({ id, name }) => ({ id, name })),
+      rosterAgents: rosterAgents.map(({ id, name }) => ({ id, name })),
+      preview: input.preview,
+      teamGuideExists: input.teamGuideExists ?? false,
+      teamGuideMode: input.teamGuideMode,
+    },
+  )
+}
+
 export default Plugin.define({
   id: "orchestra",
   async setup(ctx) {
@@ -799,12 +964,50 @@ export default Plugin.define({
 
       editor.add({
         name: "team_setup_ui",
-        description: "Prepare one staged Orchestra team setup mockup page with live roles and configuration.",
+        description: "Generate one self-contained setup page. Pass language and every stage-specific copy key required by src/commands/team.md.",
         options: { namespace: "orchestra", codemode: true },
         input: {
           type: "object",
           properties: {
-            stage: { type: "string", enum: ["agents", "domains", "approval"] },
+            stage: { type: "string", enum: ["lead", "agents", "domains", "approval"] },
+            language: { type: "string", minLength: 2 },
+            copy: {
+              type: "object",
+              description: "Localized UI strings. Required keys depend on stage; see the team_setup_ui instructions.",
+              properties: {
+                title: { type: "string", description: "Page title, required for every stage." },
+                step: { type: "string", description: "Progress text with {step}, required for every stage." },
+                description: { type: "string", description: "Optional explanatory text." },
+                leadLabel: { type: "string" },
+                leadPlaceholder: { type: "string" },
+                soloLabel: { type: "string" },
+                continue: { type: "string" },
+                selectLeadError: { type: "string" },
+                leadSelected: { type: "string" },
+                addMember: { type: "string" },
+                nameLabel: { type: "string" },
+                removeMember: { type: "string" },
+                rosterError: { type: "string" },
+                rosterSelected: { type: "string" },
+                addDomain: { type: "string" },
+                domainPlaceholder: { type: "string" },
+                removeDomain: { type: "string" },
+                domainLead: { type: "string" },
+                leadHint: { type: "string" },
+                domainError: { type: "string" },
+                domainsSelected: { type: "string" },
+                members: { type: "string" },
+                noDomains: { type: "string" },
+                guideAppend: { type: "string" },
+                guideOverwrite: { type: "string" },
+                hierarchy: { type: "string" },
+                domains: { type: "string" },
+                approve: { type: "string" },
+                approved: { type: "string" },
+              },
+              additionalProperties: { type: "string" },
+            },
+            lead: { type: "string", minLength: 1 },
             solo: { type: "boolean" },
             teamGuideMode: { type: "string", enum: ["overwrite", "append"] },
             leadAgents: {
@@ -902,33 +1105,10 @@ export default Plugin.define({
             },
             teamGuideExists: { type: "boolean" },
           },
-          required: ["leadAgents", "rosterAgents", "teamGuideExists"],
+          required: ["stage", "language", "copy"],
           additionalProperties: false,
         },
-        execute: async (raw) => {
-          const template = await readFile(
-            new URL("../design/team-setup-panel.html", import.meta.url),
-            "utf8",
-          )
-          const data = JSON.stringify(raw).replace(/[<>&\u2028\u2029]/g, (char) =>
-            `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
-          )
-          const html = template.replace('{"demo":true}', data)
-          const compressed = gzipSync(html).toString("base64")
-          return result(
-            '<!doctype html><html><head><meta charset="utf-8"></head><body><script>' +
-            `const b=Uint8Array.from(atob("${compressed}"),c=>c.charCodeAt(0));` +
-            'new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream("gzip"))).text().then(h=>{' +
-            'const page=new DOMParser().parseFromString(h,"text/html");' +
-            'document.title=page.title;document.documentElement.lang=page.documentElement.lang;' +
-            'document.head.append(...[...page.head.querySelectorAll("style,meta[name=viewport]")].map(node=>node.cloneNode(true)));' +
-            'document.body.replaceChildren(...page.body.childNodes);' +
-            'for(const old of document.body.querySelectorAll("script:not([type])")){' +
-            'const script=document.createElement("script");script.textContent=old.textContent;old.replaceWith(script)}' +
-            '}).catch(()=>{document.body.textContent="Impossibile caricare la configurazione del team."})' +
-            '</script></body></html>',
-          )
-        },
+        execute: async (raw) => result(teamSetupPage(raw as TeamSetupPageInput)),
       })
 
       editor.add({
