@@ -5,3 +5,6 @@ coverage/
 .opencode/
 .openchamber/
 .playwright*
+.stfolder/
+.stversions/
+.stignore
