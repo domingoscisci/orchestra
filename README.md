@@ -85,4 +85,8 @@ The package targets `@opencode/plugin` 2.2.6 and later compatible 2.x releases.
 
 See the [runbook](_docs/runbooks/manage-child-sessions.md) for tool usage and
 the OpenCode API workflow. The proposed persistent board model is documented in
-the [team data model](_docs/team-data-model.md).
+the [team data model](_docs/team-data-model.md). The decision not to integrate
+OpenChamber Workflows is recorded in
+[ADR 0001](_docs/adr/0001-do-not-integrate-openchamber-workflows.md). The draft
+for converting Orchestra into an OpenChamber extension is in
+[plan 0003](_docs/planning/0003-draft-orchestra-openchamber-extension.md).
