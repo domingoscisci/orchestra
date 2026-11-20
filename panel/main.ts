@@ -298,7 +298,7 @@ function agentOptions(
   return `${selected && !agents.some((agent) => agent.id === selected)
     ? `<option value="${esc(selected)}" selected>${esc(selected)} (non disponibile)</option>`
     : ""}${agents.map((agent) =>
-    `<option value="${esc(agent.id)}"${agent.id === selected ? " selected" : ""}>${esc(agent.name)}</option>`,
+    `<option value="${esc(agent.id)}"${agent.id === selected ? " selected" : ""}>${esc(agent.id.includes("/") ? agent.id : agent.name)}</option>`,
   ).join("")}`
 }
 

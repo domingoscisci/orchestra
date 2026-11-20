@@ -27,6 +27,7 @@ test("extension manages YAML teams and prompts the plugin to activate them", asy
   expect(service).toContain('request.url?.match(/^\\/v1\\/activations\\/')
   expect(service).toContain('endpoint.hostname !== "127.0.0.1"')
   expect(panel).toContain('await walk(".opencode/agents")')
+  expect(panel).toContain('agent.id.includes("/") ? agent.id : agent.name')
   expect(panel).toContain('data-lead-role')
   expect(panel).toContain('agentOptions("roster"')
 })
