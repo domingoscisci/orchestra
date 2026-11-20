@@ -1,6 +1,8 @@
 import { Plugin } from "@opencode/plugin"
 import { randomUUID } from "node:crypto"
-import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
+import { createServer } from "node:http"
+import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
+import { homedir, platform } from "node:os"
 import { join } from "node:path"
 import {
   agentLabel,
@@ -38,8 +40,158 @@ type SessionInfo = {
 
 type TeamStorage = {
   get(key: string): Promise<unknown>
-  set(key: string, value: TeamDocument): Promise<void>
+  set(key: string, value: unknown): Promise<void>
   remove(key: string): Promise<void>
+}
+
+type ActivationReceipt = {
+  requestId: string
+  state: "pending" | "activated" | "failed"
+  updatedAt: number
+  error?: string
+}
+
+const ACTIVATION_RECEIPTS_KEY = "orchestra:activation-receipts:v1"
+
+function orchestraDataDirectory() {
+  if (process.env.ORCHESTRA_DATA_DIRECTORY) {
+    return process.env.ORCHESTRA_DATA_DIRECTORY
+  }
+  if (platform() === "darwin") return join(homedir(), "Library", "Application Support", "Orchestra")
+  if (platform() === "win32") {
+    return join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "Orchestra")
+  }
+  return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "orchestra")
+}
+
+async function readReceipts(storage: TeamStorage): Promise<ActivationReceipt[]> {
+  const value = await storage.get(ACTIVATION_RECEIPTS_KEY)
+  if (!Array.isArray(value)) return []
+  return value.filter((receipt): receipt is ActivationReceipt =>
+    !!receipt && typeof receipt === "object" &&
+    typeof receipt.requestId === "string" &&
+    ["pending", "activated", "failed"].includes(receipt.state) &&
+    typeof receipt.updatedAt === "number" &&
+    (receipt.error === undefined || typeof receipt.error === "string"),
+  )
+}
+
+async function writeReceipt(storage: TeamStorage, receipt: ActivationReceipt) {
+  const receipts = await readReceipts(storage)
+  const next = [receipt, ...receipts.filter((item) => item.requestId !== receipt.requestId)]
+    .slice(0, 50)
+  await storage.set(ACTIVATION_RECEIPTS_KEY, next as unknown as TeamDocument)
+}
+
+async function createActivationServer(storage: TeamStorage) {
+  const dataDirectory = orchestraDataDirectory()
+  const discoveryPath = join(dataDirectory, "activation-service.json")
+  const token = randomUUID()
+  const server = createServer(async (request, response) => {
+    if (request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401).end()
+      return
+    }
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "content-type": "application/json" })
+        .end('{"ready":true,"service":"orchestra-activation","version":1}')
+      return
+    }
+    const match = request.method === "GET" &&
+      request.url?.match(/^\/v1\/activations\/([0-9a-f-]{36})$/i)
+    if (!match) {
+      response.writeHead(404).end()
+      return
+    }
+    try {
+      const receipt = (await readReceipts(storage))
+        .find((item) => item.requestId === match[1])
+      response.writeHead(receipt ? 200 : 404, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      }).end(JSON.stringify(receipt ?? { error: "not_found" }))
+    } catch {
+      response.writeHead(503).end()
+    }
+  })
+
+  await mkdir(dataDirectory, { recursive: true, mode: 0o700 })
+  await chmod(dataDirectory, 0o700)
+  try {
+    const existing = JSON.parse(await readFile(discoveryPath, "utf8")) as {
+      url?: string; token?: string
+    }
+    if (existing.url && existing.token) {
+      const endpoint = new URL(existing.url)
+      if (endpoint.protocol === "http:" && endpoint.hostname === "127.0.0.1" &&
+        endpoint.port && endpoint.pathname === "/") {
+        const health = await fetch(`${endpoint.origin}/health`, {
+          headers: { authorization: `Bearer ${existing.token}` },
+          signal: AbortSignal.timeout(500),
+        }).catch(() => undefined)
+        if (health?.ok) {
+          const status = await health.json().catch(() => undefined) as {
+            service?: string; version?: number
+          } | undefined
+          if (status?.service === "orchestra-activation" && status.version === 1) {
+            return async () => {}
+          }
+        }
+      }
+    }
+  } catch { /* stale or malformed discovery file */ }
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1", resolve)
+  })
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("Could not start activation service")
+  const tempPath = `${discoveryPath}.${randomUUID()}.tmp`
+  await writeFile(tempPath, JSON.stringify({
+    url: `http://127.0.0.1:${address.port}`,
+    token,
+  }), { mode: 0o600 })
+  await chmod(tempPath, 0o600)
+  await rename(tempPath, discoveryPath)
+  return async () => {
+    try {
+      const current = JSON.parse(await readFile(discoveryPath, "utf8"))
+      if (current.token === token) await unlink(discoveryPath)
+    } catch { /* already removed */ }
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+let activationService: { stop: () => Promise<void>; users: number } | undefined
+let activationServiceStarting: Promise<() => Promise<void>> | undefined
+
+async function startActivationServer(storage: TeamStorage) {
+  if (activationService) {
+    activationService.users++
+  } else {
+    activationServiceStarting ??= createActivationServer(storage)
+    try {
+      const stop = await activationServiceStarting
+      if (activationService) activationService.users++
+      else activationService = { stop, users: 1 }
+    } catch (error) {
+      activationServiceStarting = undefined
+      throw error
+    }
+  }
+  let released = false
+  return async () => {
+    if (released || !activationService) return
+    released = true
+    activationService.users--
+    if (activationService.users === 0) {
+      const current = activationService
+      activationService = undefined
+      activationServiceStarting = undefined
+      await current.stop()
+    }
+  }
 }
 
 function teamGuide(
@@ -173,56 +325,6 @@ async function writeAtomicText(path: string, content: string) {
     await unlink(temporary).catch(() => undefined)
     throw error
   }
-}
-
-type TeamConfig = {
-  lead: { name: string; agent: string }
-  roster: TeamRosterEntry[]
-  domains: TeamDomain[]
-}
-
-function parseTeamConfig(text: string): TeamConfig {
-  let value: unknown
-  try {
-    value = JSON.parse(text)
-  } catch {
-    throw new Error(
-      ".team.yml is malformed or uses unsupported YAML syntax. It must be a " +
-      "JSON-compatible YAML object; fix or remove it before /team setup.",
-    )
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(".team.yml must contain a JSON-compatible YAML object")
-  }
-  const config = value as Record<string, unknown>
-  const lead = typeof config.lead === "string"
-    ? { name: config.lead, agent: config.lead }
-    : config.lead
-  if (Object.keys(config).sort().join(",") !== "domains,lead,roster" ||
-    !lead || typeof lead !== "object" || Array.isArray(lead) ||
-    Object.keys(lead).sort().join(",") !== "agent,name" ||
-    typeof lead.name !== "string" || !lead.name.trim() ||
-    typeof lead.agent !== "string" || !lead.agent.trim() ||
-    !Array.isArray(config.roster) || !Array.isArray(config.domains)) {
-    throw new Error(".team.yml must contain only lead, roster, and domains")
-  }
-  for (const member of config.roster) {
-    if (!member || typeof member !== "object" || Array.isArray(member) ||
-      Object.keys(member).sort().join(",") !== "agent,name" ||
-      typeof member.name !== "string" || typeof member.agent !== "string") {
-      throw new Error(".team.yml contains an invalid roster entry")
-    }
-  }
-  for (const domain of config.domains) {
-    if (!domain || typeof domain !== "object" || Array.isArray(domain) ||
-      Object.keys(domain).sort().join(",") !== "lead,members,name" ||
-      typeof domain.name !== "string" || typeof domain.lead !== "string" ||
-      !Array.isArray(domain.members) ||
-      domain.members.some((member) => typeof member !== "string")) {
-      throw new Error(".team.yml contains an invalid domain")
-    }
-  }
-  return { ...config, lead } as TeamConfig
 }
 
 async function updateTeamGuides(
@@ -524,172 +626,6 @@ function result(content: string) {
   return { content }
 }
 
-const teamSetupStyle = `
-body{margin:0;padding:1rem;color:var(--foreground);font:16px system-ui,sans-serif}
-main{max-width:44rem;margin:auto}.step,.muted,.hint{color:var(--muted-foreground);font-size:.82rem}
-h1{font-size:1.3rem;margin:.2rem 0 .4rem}p{margin:.4rem 0 .8rem}
-.card{padding:.75rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);margin:.55rem 0}
-.row{display:flex;align-items:center;gap:.5rem}.row label{flex:1}
-.members,.choices{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.65rem}
-.member,.choice{display:flex;align-items:center;gap:.35rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--background)}
-input[type=text],select{min-width:0;padding:.5rem .6rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--background);color:var(--foreground);font:inherit}
-.member input[type=text]{flex:1}.field{display:grid;gap:.25rem}.icon,.button{padding:.5rem .7rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font:inherit;cursor:pointer}
-.icon{width:2rem;height:2rem;padding:0;font-size:1.2rem}.primary{border-color:var(--primary);background:var(--primary);color:var(--primary-foreground);font-weight:600}
-.actions{display:flex;justify-content:flex-end;margin-top:.85rem}.status{color:var(--destructive);font-size:.82rem}
-.tree{margin:.4rem 0 0 .9rem;padding-left:.8rem;border-left:1px solid var(--border)}.tree .tree{margin-left:.5rem}
-.role{display:block;margin-top:.12rem;color:var(--muted-foreground);font-size:.8rem}
-`
-
-type TeamSetupPageInput = {
-  stage: "lead" | "agents" | "domains" | "approval"
-  language: string
-  copy: Record<string, string>
-  lead?: string
-  solo?: boolean
-  leadAgents?: Array<Pick<AgentInfo, "id" | "name" | "description">>
-  rosterAgents?: Array<Pick<AgentInfo, "id" | "name" | "description">>
-  initialConfig?: TeamConfig
-  preview?: {
-    members: Array<{ name: string; role: string; acronym: string; parent: string | null }>
-    domains: Array<{ name: string; lead: string; members: string[] }>
-  }
-  teamGuideExists?: boolean
-  teamGuideMode?: "overwrite" | "append"
-}
-
-function teamSetupPage(input: TeamSetupPageInput) {
-  const leadAgents = input.leadAgents ?? []
-  const rosterAgents = input.rosterAgents ?? []
-  if (input.stage === "lead" && !leadAgents.length) {
-    throw new Error("Lead stage requires live lead agent definitions")
-  }
-  if (input.stage === "agents" && (!input.lead || !rosterAgents.length)) {
-    throw new Error("Agents stage requires a selected lead and live roster roles")
-  }
-  if (input.stage === "domains" && !input.initialConfig?.roster.length) {
-    throw new Error("Domains stage requires the selected non-empty roster")
-  }
-  if (input.stage === "approval" && input.teamGuideExists && !input.teamGuideMode) {
-    throw new Error("Approval stage requires the existing TEAM.md choice")
-  }
-  const required = [
-    "title", "step",
-    ...(input.stage === "lead" ? [
-      "leadLabel", "leadPlaceholder", "soloLabel", "continue",
-      "selectLeadError", "leadSelected",
-    ] : input.stage === "agents" ? [
-      "continue", "addMember", "nameLabel", "removeMember",
-      "rosterError", "rosterSelected",
-    ] : input.stage === "domains" ? [
-      "addDomain", "continue", "domainPlaceholder", "removeDomain",
-      "domainLead", "leadPlaceholder", "leadHint", "domainError",
-      "domainsSelected",
-    ] : [
-      "domainLead", "members", "noDomains", "guideAppend",
-      "guideOverwrite", "hierarchy", "domains", "approve", "approved",
-    ]),
-  ]
-  for (const key of required) {
-    if (!input.copy[key]) throw new Error(`Missing localized setup text: ${key}`)
-  }
-  const text = (key: string) => {
-    const value = input.copy[key]
-    if (!value) throw new Error(`Missing localized setup text: ${key}`)
-    return value
-  }
-  const esc = (value: unknown) => String(value).replace(/[&<>"']/g, (char) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!,
-  )
-  const page = (
-    step: number,
-    body: string,
-    script: string,
-    data: unknown = input,
-  ) => {
-    const safeJson = JSON.stringify({
-      ...data as object,
-      language: input.language,
-      copy: input.copy,
-    }).replace(/[<>&\u2028\u2029]/g, (char) =>
-      `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
-    )
-    const description = input.copy.description
-      ? `<p>${esc(input.copy.description)}</p>`
-      : ""
-    return `<!doctype html><html lang="${esc(input.language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(text("title"))}</title><style>${teamSetupStyle}</style></head><body><main><p class="step">${esc(text("step").replace("{step}", String(step)))}</p><h1>${esc(text("title"))}</h1>${description}${body}<p class="status" id="status" aria-live="polite"></p></main><script id="data" type="application/json">${safeJson}</script><script>const d=JSON.parse(document.querySelector("#data").textContent);const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));${script}</script></body></html>`
-  }
-
-  if (input.stage === "lead") {
-    const chosenLead = input.lead ?? input.initialConfig?.lead.agent ?? ""
-    const selectedSolo = input.solo ?? (input.initialConfig?.roster.length === 0)
-    const options = leadAgents.map((agent) =>
-      `<option value="${esc(agent.id)}" ${agent.id === chosenLead ? "selected" : ""}>${esc(agent.name)}${agent.description ? ` — ${esc(agent.description)}` : ""}</option>`,
-    ).join("")
-    return page(1,
-      `<label class="field">${esc(text("leadLabel"))}<select id="lead"><option value="">${esc(text("leadPlaceholder"))}</option>${options}</select></label><label class="choice"><input id="solo" type="checkbox" ${selectedSolo ? "checked" : ""}> ${esc(text("soloLabel"))}</label><div class="actions"><button class="button primary" id="continue">${esc(text("continue"))}</button></div>`,
-      `document.querySelector("#continue").onclick=async()=>{const lead=document.querySelector("#lead").value;if(!lead){document.querySelector("#status").textContent=d.copy.selectLeadError;return}const button=document.querySelector("#continue");button.disabled=true;try{await openchamber.submit({lead,solo:document.querySelector("#solo").checked},d.copy.leadSelected)}catch{button.disabled=false}};`,
-      { leadAgents, lead: chosenLead, solo: selectedSolo },
-    )
-  }
-
-  if (input.stage === "agents") {
-    return page(2,
-      `<div id="roles"></div><div class="actions"><button class="button primary" id="continue">${esc(text("continue"))}</button></div>`,
-      `const title=id=>id.replace(/([a-z\\d])([A-Z])/g,"$1 $2").replace(/[_-]+/g," ").toLocaleLowerCase().replace(/(^|\\s)(\\p{L})/gu,(_,a,b)=>a+b.toLocaleUpperCase());const state=Object.fromEntries(d.rosterAgents.map(r=>[r.id,{role:r,members:(d.initialConfig?.roster||[]).filter(m=>m.agent===r.id).map(m=>({name:m.name,custom:true}))}]));function sync(id){const a=state[id].members,n=title(id);a.forEach((m,i)=>{if(!m.custom)m.name=a.length===1?n:n+" "+(i+1)})}function draw(){const root=document.querySelector("#roles");root.innerHTML=d.rosterAgents.map(r=>{const a=state[r.id].members;return '<section class="card"><div class="row"><input type="checkbox" data-role="'+esc(r.id)+'" '+(a.length?"checked":"")+'><label><strong>'+esc(title(r.id))+'</strong><span class="role">'+esc(r.description||"")+'</span></label><button class="icon" aria-label="'+esc(d.copy.addMember)+' '+esc(title(r.id))+'" data-add="'+esc(r.id)+'" '+(a.length?"":"disabled")+'>+</button></div>'+a.map((m,i)=>'<div class="row members"><input type="text" maxlength="80" aria-label="'+esc(d.copy.nameLabel)+'" data-name="'+esc(r.id)+'" data-index="'+i+'" value="'+esc(m.name)+'"><button class="icon" aria-label="'+esc(d.copy.removeMember)+' '+esc(m.name)+'" data-remove="'+esc(r.id)+'" data-index="'+i+'">−</button></div>').join("")+'</section>'}).join("");root.querySelectorAll("[data-role]").forEach(e=>e.onchange=()=>{const a=state[e.dataset.role].members;if(e.checked){a.push({name:"",custom:false});sync(e.dataset.role)}else state[e.dataset.role].members=[];draw()});root.querySelectorAll("[data-add]").forEach(e=>e.onclick=()=>{state[e.dataset.add].members.push({name:"",custom:false});sync(e.dataset.add);draw()});root.querySelectorAll("[data-remove]").forEach(e=>e.onclick=()=>{const a=state[e.dataset.remove].members;a.splice(+e.dataset.index,1);sync(e.dataset.remove);draw()});root.querySelectorAll("[data-name]").forEach(e=>e.oninput=()=>{const m=state[e.dataset.name].members[+e.dataset.index];m.name=e.value;m.custom=true})}draw();document.querySelector("#continue").onclick=async()=>{const roster=Object.values(state).flatMap(x=>x.members.map(m=>({name:m.name.trim(),agent:x.role.id})));const names=roster.map(m=>m.name.toLowerCase());if(!roster.length||roster.some(m=>!m.name)||new Set(names).size!==names.length){document.querySelector("#status").textContent=d.copy.rosterError;return}const button=document.querySelector("#continue");button.disabled=true;try{await openchamber.submit({lead:d.lead,solo:false,roster},d.copy.rosterSelected)}catch{button.disabled=false}};`,
-      { lead: input.lead, rosterAgents, initialConfig: input.initialConfig },
-    )
-  }
-
-  if (input.stage === "domains") {
-    return page(3,
-      `<div id="domains"></div><button class="button" id="add">${esc(text("addDomain"))}</button><div class="actions"><button class="button primary" id="continue">${esc(text("continue"))}</button></div>`,
-      `const people=d.initialConfig?.roster||[];let seq=0;const domains=(d.initialConfig?.domains||[]).map(x=>({id:"d"+seq++,name:x.name,members:x.members.map(n=>people.findIndex(p=>p.name.toLowerCase()===n.toLowerCase())).filter(i=>i>=0),lead:people.findIndex(p=>p.name.toLowerCase()===x.lead.toLowerCase())}));const used=()=>new Set(domains.flatMap(x=>x.members));function draw(){const root=document.querySelector("#domains");root.innerHTML=domains.map(x=>{const taken=used(),members=people.map((p,j)=>({p,j})).filter(({j})=>!taken.has(j)||x.members.includes(j));return '<section class="card"><div class="row"><input type="text" data-name="'+x.id+'" value="'+esc(x.name)+'" placeholder="'+esc(d.copy.domainPlaceholder)+'"><button class="button" data-remove="'+x.id+'">'+esc(d.copy.removeDomain)+'</button></div><div class="members">'+members.map(({p,j})=>'<label class="member"><input type="checkbox" data-member="'+x.id+'" data-id="'+j+'" '+(x.members.includes(j)?"checked":"")+'> '+esc(p.name)+'</label>').join("")+'</div><label class="field">'+esc(d.copy.domainLead)+'<select data-lead="'+x.id+'" '+(x.members.length?"":"disabled")+'><option value="">'+esc(d.copy.leadPlaceholder)+'</option>'+x.members.map(j=>'<option value="'+j+'" '+(x.lead===j?"selected":"")+'>'+esc(people[j].name)+'</option>').join("")+'</select><span class="hint">'+esc(d.copy.leadHint)+'</span></label></section>'}).join("");root.querySelectorAll("[data-name]").forEach(e=>e.oninput=()=>{domains.find(x=>x.id===e.dataset.name).name=e.value;validate()});root.querySelectorAll("[data-member]").forEach(e=>e.onchange=()=>{const x=domains.find(x=>x.id===e.dataset.member),id=+e.dataset.id;if(e.checked)x.members.push(id);else{x.members=x.members.filter(i=>i!==id);if(x.lead===id)x.lead=-1}draw();validate()});root.querySelectorAll("[data-lead]").forEach(e=>e.onchange=()=>{domains.find(x=>x.id===e.dataset.lead).lead=e.value===""?-1:+e.value;validate()});root.querySelectorAll("[data-remove]").forEach(e=>e.onclick=()=>{domains.splice(domains.findIndex(x=>x.id===e.dataset.remove),1);draw();validate()});validate()}function validate(){const bad=domains.some(x=>!x.name.trim()||!x.members.length||!x.members.includes(x.lead));document.querySelector("#continue").disabled=bad;document.querySelector("#status").textContent=bad?d.copy.domainError:""}document.querySelector("#add").onclick=()=>{domains.push({id:"d"+seq++,name:"",members:[],lead:-1});draw();document.querySelector("#domains .card:last-child [data-name]")?.focus()};document.querySelector("#continue").onclick=async()=>{if(document.querySelector("#continue").disabled)return;const value=domains.map(x=>({name:x.name.trim(),lead:people[x.lead].name,members:x.members.map(i=>people[i].name)}));const button=document.querySelector("#continue");button.disabled=true;try{await openchamber.submit({domains:value},d.copy.domainsSelected)}catch{button.disabled=false}};draw();`,
-      { initialConfig: input.initialConfig },
-    )
-  }
-
-  if (!input.preview) throw new Error("Approval stage requires a validated team preview")
-  const preview = input.preview
-  const agentName = (id: string) => {
-    return id.replace(/([a-z\d])([A-Z])/g, "$1 $2")
-      .replace(/[_-]+/g, " ")
-      .toLocaleLowerCase(input.language)
-      .replace(/(^|\s)(\p{L})/gu, (_, space, letter) =>
-        space + letter.toLocaleUpperCase(input.language))
-  }
-  type PreviewNode = typeof preview.members[number] & { children: PreviewNode[] }
-  const byName = new Map<string, PreviewNode>(preview.members.map((member) =>
-    [member.name.toLowerCase(), { ...member, children: [] }] as const,
-  ))
-  const roots: PreviewNode[] = []
-  for (const member of byName.values()) {
-    const parent = member.parent ? byName.get(member.parent.toLowerCase()) : undefined
-    if (parent) parent.children.push(member)
-    else roots.push(member)
-  }
-  const renderTree = (members: PreviewNode[]): string => members.map((member) =>
-    `<li><strong>${esc(member.acronym)} · ${esc(member.name)}</strong><span class="role">${esc(agentName(member.role))}</span>${member.children.length ? `<ul class="tree">${renderTree(member.children)}</ul>` : ""}</li>`,
-  ).join("")
-  const domains = preview.domains.length
-    ? `<ul>${preview.domains.map((domain) => `<li><strong>${esc(domain.name)}</strong><span class="role">${esc(text("domainLead"))}: ${esc(domain.lead)} · ${esc(text("members"))}: ${domain.members.map(esc).join(", ")}</span></li>`).join("")}</ul>`
-    : `<p class="muted">${esc(text("noDomains"))}</p>`
-  const guide = input.teamGuideExists
-    ? `<p class="hint">TEAM.md: ${esc(text(input.teamGuideMode === "append" ? "guideAppend" : "guideOverwrite"))}.</p>`
-    : ""
-  return page(4,
-    `<section class="card"><strong>${esc(text("hierarchy"))}</strong><ul class="tree">${renderTree(roots)}</ul></section><section class="card"><strong>${esc(text("domains"))}</strong>${domains}</section>${guide}<div class="actions"><button class="button primary" id="approve">${esc(text("approve"))}</button></div>`,
-    `document.querySelector("#approve").onclick=async()=>{const button=document.querySelector("#approve");button.disabled=true;try{await openchamber.submit({approved:true,preview:d.preview},d.copy.approved)}catch{button.disabled=false}};`,
-    {
-      lead: input.lead,
-      leadAgents: leadAgents.map(({ id, name }) => ({ id, name })),
-      rosterAgents: rosterAgents.map(({ id, name }) => ({ id, name })),
-      preview: input.preview,
-      teamGuideExists: input.teamGuideExists ?? false,
-      teamGuideMode: input.teamGuideMode,
-    },
-  )
-}
-
 export default Plugin.define({
   id: "orchestra",
   async setup(ctx) {
@@ -701,6 +637,7 @@ export default Plugin.define({
     const executions = new Map<string, boolean>()
     const teamQueues = new Map<string, Promise<void>>()
     const eventController = new AbortController()
+    const stopActivationServer = await startActivationServer(storage)
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: eventController.signal })) {
         trackExecution(executions, event)
@@ -716,108 +653,11 @@ export default Plugin.define({
       }
     })
 
-    await ctx.tool.transform((editor) => {
+    try {
+      await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "orchestra",
         description: "Manage team assignments and child-agent sessions",
-      })
-
-      editor.add({
-        name: "storage_probe",
-        description: "Verify plugin storage read, write, and delete operations.",
-        options: { namespace: "orchestra", codemode: true },
-        input: {
-          type: "object",
-          properties: {
-            phase: {
-              type: "string",
-              enum: ["roundtrip", "save", "verify", "concurrent"],
-            },
-          },
-          additionalProperties: false,
-        },
-        execute: async (raw) => {
-          const { phase = "roundtrip" } = raw as {
-            phase?: "roundtrip" | "save" | "verify" | "concurrent"
-          }
-          const key = "storage-probe:restart:v1"
-          const value = { probe: "persist-across-process-restart" }
-          if (phase === "save") {
-            if (await ctx.storage.get(key) !== undefined) {
-              throw new Error("Storage probe restart key already exists")
-            }
-            await ctx.storage.set(key, value)
-            return result(JSON.stringify({ saved: true }))
-          }
-
-          if (phase === "verify") {
-            try {
-              const persisted = await ctx.storage.get(key)
-              if (JSON.stringify(persisted) !== JSON.stringify(value)) {
-                throw new Error("Storage probe value did not survive process restart")
-              }
-              await ctx.storage.remove(key)
-              if (await ctx.storage.get(key) !== undefined) {
-                throw new Error("Storage probe key still exists after removal")
-              }
-              return result(JSON.stringify({
-                survivedRestart: true,
-                remove: true,
-              }))
-            } finally {
-              await ctx.storage.remove(key)
-            }
-          }
-
-          if (phase === "concurrent") {
-            const concurrentKey = `storage-probe:concurrent:${randomUUID()}`
-            const values = Array.from({ length: 16 }, (_, writer) => ({
-              writer,
-              payload: String(writer).repeat(4096),
-            }))
-            try {
-              await Promise.all(values.map((value) => ctx.storage.set(concurrentKey, value)))
-              const saved = await ctx.storage.get(concurrentKey)
-              if (!values.some((value) => JSON.stringify(value) === JSON.stringify(saved))) {
-                throw new Error("Concurrent storage writes produced an unknown or partial value")
-              }
-              await ctx.storage.remove(concurrentKey)
-              if (await ctx.storage.get(concurrentKey) !== undefined) {
-                throw new Error("Concurrent storage probe key still exists after removal")
-              }
-              return result(JSON.stringify({
-                writers: values.length,
-                finalValueIntact: true,
-                remove: true,
-              }))
-            } finally {
-              await ctx.storage.remove(concurrentKey)
-            }
-          }
-
-          const roundtripKey = `storage-probe:${randomUUID()}`
-          const before = await ctx.storage.get(roundtripKey)
-          if (before !== undefined) throw new Error("Storage probe key already exists")
-
-          try {
-            await ctx.storage.set(roundtripKey, value)
-            const saved = await ctx.storage.get(roundtripKey)
-            if (JSON.stringify(saved) !== JSON.stringify(value)) {
-              throw new Error("Storage probe read-after-write mismatch")
-            }
-            await ctx.storage.remove(roundtripKey)
-            if (await ctx.storage.get(roundtripKey) !== undefined) {
-              throw new Error("Storage probe key still exists after removal")
-            }
-            return result(JSON.stringify({
-              readMissing: true,
-              writeAndRead: true,
-              remove: true,
-            }))
-          } finally {
-            await ctx.storage.remove(roundtripKey)
-          }
-        },
       })
 
       editor.add({
@@ -892,240 +732,6 @@ export default Plugin.define({
             hidden: agent.hidden,
           }))))
         },
-      })
-
-      editor.add({
-        name: "save_team",
-        description: "Save the active Orchestra team configuration to .team.yml.",
-        options: { namespace: "orchestra", codemode: true },
-        input: {
-          type: "object",
-          properties: { overwrite: { type: "boolean" } },
-          additionalProperties: false,
-        },
-        execute: async (raw, toolContext) => {
-          const input = raw as { overwrite?: boolean }
-          const current = await session.get({ sessionID: toolContext.sessionID })
-          const context = await findTeamContext(storage, session, current)
-          if (!context) throw new Error("There is no active Orchestra team to save")
-          const { team } = context
-          const lead = team.teamMembers.find((member) =>
-            member.id === team.teamRun.leadMemberId,
-          )!
-          const listed = await agents.list()
-          const byID = new Map(team.teamMembers.map((member) => [member.id, member]))
-          const config: TeamConfig = {
-            lead: {
-              name: listed.data.find((agent) => agent.id === lead.role)?.name ?? lead.role,
-              agent: lead.role,
-            },
-            roster: team.teamMembers.filter((member) => member.id !== lead.id)
-              .map(({ name, role }) => ({ name, agent: role })),
-            domains: team.domains.map((domain) => ({
-              name: domain.name,
-              lead: byID.get(domain.leadMemberId)!.name,
-              members: domain.memberIds.map((id) => byID.get(id)!.name),
-            })),
-          }
-          const projectDirectory = context.root.directory ?? directory
-          const path = join(projectDirectory, ".team.yml")
-          if (await readOptionalText(path) !== undefined && !input.overwrite) {
-            throw new Error(".team.yml already exists. Confirm overwrite and retry with overwrite: true.")
-          }
-          await writeAtomicText(path, `${JSON.stringify(config, null, 2)}\n`)
-          return result("Saved active Orchestra team configuration to .team.yml.")
-        },
-      })
-
-      editor.add({
-        name: "load_team",
-        description: "Read and validate the project .team.yml configuration.",
-        options: { namespace: "orchestra", codemode: true },
-        input: {
-          type: "object",
-          properties: { forSetup: { type: "boolean" } },
-          additionalProperties: false,
-        },
-        execute: async (raw, toolContext) => {
-          const input = raw as { forSetup?: boolean }
-          const current = await session.get({ sessionID: toolContext.sessionID })
-          if (await findTeamContext(storage, session, current)) {
-            throw new Error("Close the active Orchestra team with /team done before loading")
-          }
-          const path = join(current.directory ?? directory, ".team.yml")
-          const teamGuideExists =
-            await readOptionalText(join(current.directory ?? directory, "TEAM.md")) !== undefined
-          const text = await readOptionalText(path)
-          if (text === undefined) {
-            return result(JSON.stringify({ exists: false, teamGuideExists }))
-          }
-          const config = parseTeamConfig(text)
-          const listed = await agents.list()
-          config.lead.name = listed.data.find((agent) =>
-            agent.id === config.lead.agent,
-          )?.name ?? config.lead.name
-          try {
-            validateTeamRoster(config.lead.agent, config.roster, config.domains, listed.data)
-          } catch (error) {
-            if (!input.forSetup) throw error
-            return result(JSON.stringify({
-              exists: true,
-              teamGuideExists,
-              ...config,
-              resumeError: error instanceof Error ? error.message : String(error),
-            }))
-          }
-          return result(JSON.stringify({ exists: true, teamGuideExists, ...config }))
-        },
-      })
-
-      editor.add({
-        name: "team_setup_ui",
-        description: "Generate one self-contained setup page. Pass language and every stage-specific copy key required by src/commands/team.md.",
-        options: { namespace: "orchestra", codemode: true },
-        input: {
-          type: "object",
-          properties: {
-            stage: { type: "string", enum: ["lead", "agents", "domains", "approval"] },
-            language: { type: "string", minLength: 2 },
-            copy: {
-              type: "object",
-              description: "Localized UI strings. Required keys depend on stage; see the team_setup_ui instructions.",
-              properties: {
-                title: { type: "string", description: "Page title, required for every stage." },
-                step: { type: "string", description: "Progress text with {step}, required for every stage." },
-                description: { type: "string", description: "Optional explanatory text." },
-                leadLabel: { type: "string" },
-                leadPlaceholder: { type: "string" },
-                soloLabel: { type: "string" },
-                continue: { type: "string" },
-                selectLeadError: { type: "string" },
-                leadSelected: { type: "string" },
-                addMember: { type: "string" },
-                nameLabel: { type: "string" },
-                removeMember: { type: "string" },
-                rosterError: { type: "string" },
-                rosterSelected: { type: "string" },
-                addDomain: { type: "string" },
-                domainPlaceholder: { type: "string" },
-                removeDomain: { type: "string" },
-                domainLead: { type: "string" },
-                leadHint: { type: "string" },
-                domainError: { type: "string" },
-                domainsSelected: { type: "string" },
-                members: { type: "string" },
-                noDomains: { type: "string" },
-                guideAppend: { type: "string" },
-                guideOverwrite: { type: "string" },
-                hierarchy: { type: "string" },
-                domains: { type: "string" },
-                approve: { type: "string" },
-                approved: { type: "string" },
-              },
-              additionalProperties: { type: "string" },
-            },
-            lead: { type: "string", minLength: 1 },
-            solo: { type: "boolean" },
-            teamGuideMode: { type: "string", enum: ["overwrite", "append"] },
-            leadAgents: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string", minLength: 1 },
-                  name: { type: "string", minLength: 1 },
-                  description: { type: "string" },
-                },
-                required: ["id", "name"],
-                additionalProperties: false,
-              },
-            },
-            rosterAgents: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string", minLength: 1 },
-                  name: { type: "string", minLength: 1 },
-                  description: { type: "string" },
-                },
-                required: ["id", "name"],
-                additionalProperties: false,
-              },
-            },
-            preview: {
-              type: "object",
-              properties: {
-                members: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string" },
-                      role: { type: "string" },
-                      acronym: { type: "string" },
-                      parent: { anyOf: [{ type: "string" }, { type: "null" }] },
-                    },
-                    required: ["name", "role", "acronym", "parent"],
-                    additionalProperties: true,
-                  },
-                },
-                domains: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string" },
-                      lead: { type: "string" },
-                      members: { type: "array", items: { type: "string" } },
-                    },
-                    required: ["name", "lead", "members"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["members", "domains"],
-              additionalProperties: false,
-            },
-            initialConfig: {
-              type: "object",
-              properties: {
-                lead: { type: "string", minLength: 1 },
-                roster: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string", minLength: 1, maxLength: 80 },
-                      agent: { type: "string", minLength: 1 },
-                    },
-                    required: ["name", "agent"],
-                    additionalProperties: false,
-                  },
-                },
-                domains: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string", minLength: 1 },
-                      lead: { type: "string", minLength: 1 },
-                      members: { type: "array", items: { type: "string", minLength: 1 } },
-                    },
-                    required: ["name", "lead", "members"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["lead", "roster", "domains"],
-              additionalProperties: false,
-            },
-            teamGuideExists: { type: "boolean" },
-          },
-          required: ["stage", "language", "copy"],
-          additionalProperties: false,
-        },
-        execute: async (raw) => result(teamSetupPage(raw as TeamSetupPageInput)),
       })
 
       editor.add({
@@ -1220,8 +826,8 @@ export default Plugin.define({
               },
             },
             approved: { type: "boolean" },
+            requestId: { type: "string", format: "uuid" },
             teamGuideMode: { type: "string", enum: ["overwrite", "append"] },
-            saveConfig: { type: "boolean" },
           },
           required: ["lead", "roster", "domains", "approved"],
           additionalProperties: false,
@@ -1232,14 +838,30 @@ export default Plugin.define({
             roster: TeamRosterEntry[]
             domains: TeamDomain[]
             approved: boolean
+            requestId?: string
             teamGuideMode?: "overwrite" | "append"
-            saveConfig?: boolean
           }
-          if (!input.approved) throw new Error("Team activation requires explicit user approval")
+          const requestId = input.requestId
+          if (requestId) {
+            if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+              throw new Error("Invalid activation request ID")
+            }
+            const previous = await serializeTeam(teamQueues, ACTIVATION_RECEIPTS_KEY, async () => {
+              const found = (await readReceipts(storage))
+                .find((receipt) => receipt.requestId === requestId)
+              if (!found) await writeReceipt(storage, {
+                requestId, state: "pending", updatedAt: Date.now(),
+              })
+              return found
+            })
+            if (previous) return result(JSON.stringify(previous))
+          }
 
-          const mainSessionID = toolContext.sessionID
-          const key = teamStorageKey(mainSessionID)
-          return serializeTeam(teamQueues, key, async () => {
+          try {
+            if (!input.approved) throw new Error("Team activation requires explicit user approval")
+            const mainSessionID = toolContext.sessionID
+            const key = teamStorageKey(mainSessionID)
+            const activated = await serializeTeam(teamQueues, key, async () => {
             const current = await session.get({ sessionID: mainSessionID })
             if (current.id !== mainSessionID) {
               throw new Error("OpenCode returned a different main session ID")
@@ -1371,28 +993,7 @@ export default Plugin.define({
               )
               switchStarted = true
               await session.switchAgent({ sessionID: current.id, agent: input.lead })
-              if (input.saveConfig) {
-                const config: TeamConfig = {
-                  lead: {
-                    name: listed.data.find((agent) => agent.id === input.lead)?.name ??
-                      input.lead,
-                    agent: input.lead,
-                  },
-                  roster: input.roster.map(({ name, agent }) => ({
-                    name: name.trim(), agent,
-                  })),
-                  domains: input.domains.map((domain) => ({
-                    name: domain.name.trim(),
-                    lead: domain.lead.trim(),
-                    members: domain.members.map((name) => name.trim()),
-                  })),
-                }
-                await writeAtomicText(
-                  join(projectDirectory, ".team.yml"),
-                  `${JSON.stringify(config, null, 2)}\n`,
-                )
-              }
-              return result(JSON.stringify({ active: true, team }))
+              return { active: true, team }
             } catch (error) {
               const cleanupFailures: string[] = []
               if (rollbackGuides) {
@@ -1414,7 +1015,24 @@ export default Plugin.define({
               }
               throw error
             }
-          })
+            })
+            if (requestId) {
+              await serializeTeam(teamQueues, ACTIVATION_RECEIPTS_KEY, () =>
+                writeReceipt(storage, {
+                  requestId, state: "activated", updatedAt: Date.now(),
+                }))
+            }
+            return result(JSON.stringify(activated))
+          } catch (error) {
+            if (requestId) {
+              await serializeTeam(teamQueues, ACTIVATION_RECEIPTS_KEY, () =>
+                writeReceipt(storage, {
+                  requestId, state: "failed", updatedAt: Date.now(),
+                  error: "Team activation failed",
+                })).catch(() => undefined)
+            }
+            throw error
+          }
         },
       })
 
@@ -1861,7 +1479,15 @@ export default Plugin.define({
           return result(`Deleted ${child.title ?? child.id} (${child.id}).`)
         },
       })
-    })
-    return () => eventController.abort()
+      })
+    } catch (error) {
+      eventController.abort()
+      await stopActivationServer()
+      throw error
+    }
+    return async () => {
+      eventController.abort()
+      await stopActivationServer()
+    }
   },
 })

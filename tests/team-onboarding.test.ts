@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -14,6 +14,8 @@ const { default: plugin } = await import("../src/index") as unknown as {
 const lead = "lead"
 const roster = [{ name: "Dev", agent: "developer" }, { name: "Review", agent: "developer" }]
 const domains = [{ name: "Quality", lead: "Review", members: ["Dev", "Review"] }]
+const serviceDataDirectory = await mkdtemp(join(tmpdir(), "orchestra-service-test-"))
+process.env.ORCHESTRA_DATA_DIRECTORY = serviceDataDirectory
 
 describe("Orchestra team setup smoke tests", () => {
   let directory: string
@@ -26,7 +28,7 @@ describe("Orchestra team setup smoke tests", () => {
   let queuedEvents: Array<{ event: any; resolve: () => void }>
   let wakeEvents: () => void
   let emit: (event: any) => Promise<void>
-  let cleanup: () => void
+  let cleanup: () => Promise<void>
   let failCreateAt = 0
   let failPrompt = false
   let failStorageSet = false
@@ -157,9 +159,14 @@ describe("Orchestra team setup smoke tests", () => {
   })
 
   afterEach(async () => {
-    cleanup()
+    await cleanup()
     wakeEvents()
     await rm(directory, { recursive: true, force: true })
+  })
+
+  afterAll(async () => {
+    delete process.env.ORCHESTRA_DATA_DIRECTORY
+    await rm(serviceDataDirectory, { recursive: true, force: true })
   })
 
   const activate = (input: Record<string, unknown> = {}, sessionID = "main") =>
@@ -171,152 +178,34 @@ describe("Orchestra team setup smoke tests", () => {
       ...input,
     }, { sessionID })
 
-  test("storage probe reads, writes, and removes a unique value", async () => {
-    const output = await tools.storage_probe.execute({}, { sessionID: "main" })
-    expect(JSON.parse(output.content)).toEqual({
-      readMissing: true,
-      writeAndRead: true,
-      remove: true,
-    })
-    expect(storage.size).toBe(0)
-  })
-
-  test("storage probe saves for a later invocation and removes the value", async () => {
-    expect(JSON.parse((await tools.storage_probe.execute(
-      { phase: "save" }, { sessionID: "main" },
-    )).content)).toEqual({ saved: true })
-    expect(storage.size).toBe(1)
-    expect(JSON.parse((await tools.storage_probe.execute(
-      { phase: "verify" }, { sessionID: "main" },
-    )).content)).toEqual({ survivedRestart: true, remove: true })
-    expect(storage.size).toBe(0)
-  })
-
-  test("setup UI returns self-contained HTML for all four live-data stages", async () => {
-    const copy = {
-      title: "Team setup", description: "Configure the team.", step: "Step {step} of 4",
-      leadLabel: "Team Lead", leadPlaceholder: "Choose an agent", soloLabel: "Work alone",
-      continue: "Continue", selectLeadError: "Choose a Team Lead.", leadSelected: "Lead selected",
-      addMember: "Add", nameLabel: "Agent name", removeMember: "Remove",
-      rosterError: "Enter unique member names.", rosterSelected: "Roster selected",
-      addDomain: "Add domain", domainPlaceholder: "Domain name", removeDomain: "Remove",
-      domainLead: "Domain Lead", leadHint: "Lead must belong to the domain.",
-      domainError: "Complete each domain.", domainsSelected: "Domains configured",
-      members: "Members", noDomains: "No domains", guideAppend: "Append rules",
-      guideOverwrite: "Replace content", hierarchy: "Hierarchy", domains: "Domains",
-      approve: "Approve and start", approved: "Team approved",
-    }
-    const common = {
-      language: "en-GB",
-      copy,
-      leadAgents: [{ id: "lead", name: "Lead", description: "Coordinates." }],
-      rosterAgents: [
-        { id: "developer", name: "Developer", description: "</script><img src=x>" },
-      ],
-      teamGuideExists: true,
-    }
-    const render = (input: Record<string, unknown>) =>
-      tools.team_setup_ui.execute({ ...common, ...input }, { sessionID: "main" })
-
-    await expect(render({ stage: "lead", leadAgents: [] }))
-      .rejects.toThrow("requires live lead agent definitions")
-    await expect(render({ stage: "agents", lead, rosterAgents: [] }))
-      .rejects.toThrow("requires a selected lead and live roster roles")
-    await expect(render({
-      stage: "domains",
-      initialConfig: { lead: { name: "Lead", agent: lead }, roster: [], domains: [] },
-    })).rejects.toThrow("requires the selected non-empty roster")
-    await expect(render({
-      stage: "approval",
-      teamGuideExists: true,
-      teamGuideMode: undefined,
-      preview: { members: [], domains: [] },
-    })).rejects.toThrow("requires the existing TEAM.md choice")
-
-    const leadPage = await render({ stage: "lead" })
-    expect(leadPage.content).toMatch(/^<!doctype html>/)
-    expect(leadPage.content).toContain('<html lang="en-GB">')
-    expect(leadPage.content).toContain("Work alone")
-    expect(leadPage.content).toContain("Step 1 of 4")
-    const copyWithoutDescription = Object.fromEntries(
-      Object.entries(copy).filter(([key]) => key !== "description"),
-    )
-    const withoutDescription = await tools.team_setup_ui.execute({
-      ...common,
-      copy: copyWithoutDescription,
-      stage: "lead",
-    }, { sessionID: "main" })
-    expect(withoutDescription.content).not.toContain("<p>Configure the team.</p>")
-
-    const agentsPage = await render({
-      stage: "agents",
-      lead,
-      solo: false,
-    })
-    expect(agentsPage.content).toContain("data-add")
-    expect(agentsPage.content).toContain("data-remove")
-    expect(agentsPage.content).toContain("a.length===1?n:n+")
-    expect(agentsPage.content).toContain("\\u003c/script\\u003e\\u003cimg")
-    expect(agentsPage.content).not.toContain("</script><img")
-
-    const domainsPage = await render({
-      stage: "domains",
-      lead,
-      initialConfig: { lead: { name: "Lead", agent: lead }, roster, domains: [] },
-    })
-    expect(domainsPage.content).toContain("Lead must belong to the domain.")
-    expect(domainsPage.content).toContain('"domains":[]')
-    expect(domainsPage.content).toContain('e.value===""?-1:+e.value')
-
-    const approvalPage = await render({
-      stage: "approval",
-      lead,
-      preview: {
-        members: [
-          { name: "Team Lead", role: "lead", acronym: "TL", parent: null },
-          { name: "Dev", role: "developer_tools", acronym: "D", parent: "Team Lead" },
-        ],
-        domains: [],
-      },
-      teamGuideMode: "append",
-    })
-    expect(approvalPage.content).toContain("Approve and start")
-    expect(approvalPage.content).toContain("Developer Tools")
-    expect(approvalPage.content).not.toContain("Implements changes.")
-    expect(approvalPage.content).toContain("openchamber.submit({approved:true,preview:d.preview}")
-
-    for (const output of [leadPage, agentsPage, domainsPage, approvalPage]) {
-      expect(output.content).not.toContain("gzip")
-      expect(output.content).not.toContain("DecompressionStream")
-      expect(output.content).not.toContain("team-setup-panel.html")
-      const scripts = [...output.content.matchAll(/<script>([\s\S]*?)<\/script>/g)]
-      expect(scripts).toHaveLength(1)
-      expect(() => new Function(scripts[0][1])).not.toThrow()
-    }
-  })
-
-  test("saves the active team configuration and requires overwrite approval", async () => {
+  test("plugin leaves team configuration files to the extension", async () => {
+    expect(tools.save_team).toBeUndefined()
+    expect(tools.load_team).toBeUndefined()
     await activate()
-    await tools.save_team.execute({}, { sessionID: "main" })
-    expect(JSON.parse(await readFile(teamConfigPath(), "utf8"))).toEqual({
-      lead: { name: "Lead", agent: lead },
-      roster,
-      domains,
-    })
-    await expect(tools.save_team.execute({}, { sessionID: "main" }))
-      .rejects.toThrow("already exists")
-    await tools.save_team.execute({ overwrite: true }, { sessionID: "main" })
+    await expect(readFile(teamConfigPath(), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" })
   })
 
-  test("setup saves the approved configuration only after activation", async () => {
-    await writeFile(teamConfigPath(), JSON.stringify({ lead: "old", roster: [], domains: [] }))
-    await activate({ saveConfig: true })
-    expect(JSON.parse(await readFile(teamConfigPath(), "utf8"))).toEqual({
-      lead: { name: "Lead", agent: lead },
-      roster,
-      domains,
+  test("activation receipts correlate success and make duplicate IDs idempotent", async () => {
+    const requestId = "8a4c3f3d-61d2-4b9b-9d27-1c5c64a03c5e"
+    await activate({ requestId })
+    const receipts = storage.get("orchestra:activation-receipts:v1") as any[]
+    expect(receipts[0]).toMatchObject({ requestId, state: "activated" })
+    const childCount = sessions.size
+    const duplicate = await activate({ requestId })
+    expect(JSON.parse(duplicate.content)).toMatchObject({ requestId, state: "activated" })
+    expect(sessions.size).toBe(childCount)
+
+  })
+
+  test("activation failure is recorded without exposing its error details", async () => {
+    failSwitch = true
+    const requestId = "f6c59afd-8e32-4f63-b2dc-595e2c5d6e3f"
+    await expect(activate({ requestId })).rejects.toThrow("switch failed")
+    const receipts = storage.get("orchestra:activation-receipts:v1") as any[]
+    expect(receipts[0]).toMatchObject({
+      requestId, state: "failed", error: "Team activation failed",
     })
-    expect(sessions.get("main").agent).toBe(lead)
   })
 
   test("preview matches the hierarchy and acronyms created on activation", async () => {
@@ -342,65 +231,6 @@ describe("Orchestra team setup smoke tests", () => {
     expect(preview.members.map(({ name, role, acronym, parent }: any) => ({
       name, role, acronym, parent,
     }))).toEqual(actual)
-  })
-
-  test("setup rolls back activation if saving the approved configuration fails", async () => {
-    await mkdir(teamConfigPath())
-    await expect(activate({ saveConfig: true })).rejects.toThrow()
-    expect([...sessions.keys()]).toEqual(["main"])
-    expect(sessions.get("main").agent).toBe("build")
-    expect(storage.has(teamKey())).toBe(false)
-    await expect(readFile(teamGuidePath(), "utf8"))
-      .rejects.toMatchObject({ code: "ENOENT" })
-  })
-
-  test("failed activation preserves the previous saved configuration", async () => {
-    const previous = JSON.stringify({ lead: "old", roster: [], domains: [] })
-    await writeFile(teamConfigPath(), previous)
-    failSwitch = true
-    await expect(activate({ saveConfig: true })).rejects.toThrow("switch failed")
-    expect(await readFile(teamConfigPath(), "utf8")).toBe(previous)
-  })
-
-  test("loads and validates .team.yml without activating a team", async () => {
-    const missing = await tools.load_team.execute({}, { sessionID: "main" })
-    expect(JSON.parse(missing.content)).toEqual({ exists: false, teamGuideExists: false })
-    await writeFile(teamConfigPath(), JSON.stringify({ lead, roster, domains }))
-    await writeFile(teamGuidePath(), "Existing team guide\n")
-    const loaded = await tools.load_team.execute({}, { sessionID: "main" })
-    expect(JSON.parse(loaded.content)).toEqual({
-      exists: true,
-      teamGuideExists: true,
-      lead: { name: "Lead", agent: lead },
-      roster,
-      domains,
-    })
-    expect(storage.has(teamKey())).toBe(false)
-    await writeFile(teamConfigPath(), JSON.stringify({ lead: "missing", roster, domains }))
-    await expect(tools.load_team.execute({}, { sessionID: "main" }))
-      .rejects.toThrow("no longer available")
-    const stale = await tools.load_team.execute(
-      { forSetup: true },
-      { sessionID: "main" },
-    )
-    expect(JSON.parse(stale.content)).toMatchObject({
-      exists: true,
-      lead: { name: "missing", agent: "missing" },
-      resumeError: expect.stringContaining("no longer available"),
-    })
-    expect(await readFile(teamConfigPath(), "utf8"))
-      .toBe(JSON.stringify({ lead: "missing", roster, domains }))
-    await writeFile(teamConfigPath(), "not valid YAML")
-    await expect(tools.load_team.execute({}, { sessionID: "main" }))
-      .rejects.toThrow(".team.yml is malformed or uses unsupported YAML syntax")
-  })
-
-  test("setup preflight refuses to resume configuration over an active team", async () => {
-    await activate()
-    const sessionsBefore = [...sessions.keys()]
-    await expect(tools.load_team.execute({}, { sessionID: "main" }))
-      .rejects.toThrow("Close the active Orchestra team with /team done")
-    expect([...sessions.keys()]).toEqual(sessionsBefore)
   })
 
   test("activates a solo Team Lead and closes it back to the original agent", async () => {
@@ -833,10 +663,10 @@ describe("Orchestra team setup smoke tests", () => {
 
   test("documents the status meaning and operating/validation boundary", async () => {
     await activate({ roster: [], domains: [] })
-    const [teamGuide, agentsGuide, commandGuide, model] = await Promise.all([
+    const [teamGuide, agentsGuide, extensionPanel, model] = await Promise.all([
       readFile(teamGuidePath(), "utf8"),
       readFile(agentGuidePath(), "utf8"),
-      readFile(new URL("../src/commands/team.md", import.meta.url), "utf8"),
+      readFile(new URL("../panel/main.ts", import.meta.url), "utf8"),
       readFile(new URL("../_docs/model/team-data-model.md", import.meta.url), "utf8"),
     ])
     expect(teamGuide).toContain("## Rules")
@@ -846,14 +676,8 @@ describe("Orchestra team setup smoke tests", () => {
     expect(teamGuide).toContain("report_task")
     expect(teamGuide).not.toContain("INV-B03")
     expect(agentsGuide).toContain("TEAM.md")
-    expect(commandGuide).toContain("Do not expose internal invariant codes")
-    expect(commandGuide).toContain("openchamber_render")
-    expect(commandGuide).toContain('stage: "lead"')
-    expect(commandGuide).toContain('stage: "agents"')
-    expect(commandGuide).toContain('stage: "domains"')
-    expect(commandGuide).toContain('stage: "approval"')
-    expect(commandGuide).toContain("use `question` to ask whether to append")
-    expect(commandGuide).toContain("orchestra.preview_team")
+    expect(extensionPanel).toContain('const TEAM_FILE = ".team.yml"')
+    expect(extensionPanel).toContain("orchestra.activate_team")
     expect(model).toContain("latest observed execution state")
     expect(model).toContain("last persisted status may be stale")
     expect(model).toContain("stored status alone does not")

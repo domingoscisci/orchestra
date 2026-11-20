@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orchestra</title>
+    <style>
+      :root { color-scheme: light dark; font: 1rem/1.45 var(--font-sans, system-ui, sans-serif); color: var(--surface-foreground, #e8e4dc); background: var(--surface-background, #12100f); }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 2rem 3.1vw 1rem; color: inherit; background: transparent; }
+      main { width: 100%; max-width: 1440px; margin: 0 auto; }
+      .intro { font-size: 1.1rem; margin: 0 0 1.4rem; }
+      .footnote { padding: .8rem 1rem; border-radius: 1rem; background: var(--surface-muted, #191716); }
+      .editor { padding: 1.5rem 2rem; border: 1px solid var(--interactive-border, #292625); border-radius: 1rem; background: var(--surface-elevated, #1b1918); }
+      .editor > h1 { font-size: 1.45rem; }
+      .step-note { text-align: center; }
+      h1 { margin: 0; font-size: 1.65rem; line-height: 1.2; }
+      p { color: var(--surface-muted-foreground, #9a978e); line-height: 1.5; }
+      .brand { display: flex; align-items: center; gap: 1.15rem; margin-bottom: 1.6rem; }
+      .brand-icon { display: grid; place-items: center; width: 3.75rem; height: 3.75rem; border-radius: 1rem; background: color-mix(in srgb, var(--primary, #df7b42) 20%, var(--surface-elevated, #1b1918)); color: var(--primary, #df7b42); font-size: 1.8rem; font-weight: 700; }
+      .brand small { display: block; color: var(--surface-muted-foreground, #9a978e); font-size: 1rem; }
+      .project { margin-left: auto; padding: .65rem 1rem; border: 1px solid var(--interactive-border, #292625); border-radius: 2rem; color: var(--surface-muted-foreground, #9a978e); }
+      .field { display: grid; gap: .45rem; margin: 1rem 0; font-size: .9rem; }
+      .field input, .field select { font-size: .95rem; }
+      .row { display: flex; align-items: center; gap: .65rem; }
+      .row > label { flex: 1; }
+      .card { padding: 1rem; margin: .75rem 0; border: 1px solid var(--interactive-border, #292625); border-radius: 1rem; background: var(--surface-elevated, #1b1918); }
+      input, select, button { min-height: 2.8rem; padding: .55rem .85rem; border: 1px solid var(--interactive-border, #292625); border-radius: .8rem; color: inherit; background: var(--surface-background, #131110); font: inherit; }
+      input:not([type="checkbox"]), select { width: 100%; }
+      input[type="checkbox"] { min-height: auto; accent-color: var(--primary, #df7b42); }
+      button { cursor: pointer; }
+      button.primary { color: var(--primary-foreground, #120f0d); background: var(--primary, #df7b42); border-color: var(--primary, #df7b42); font-weight: 650; }
+      input:hover, select:hover, button:not(:disabled):hover { background-color: var(--interactive-hover, #292625); }
+      button.primary:hover { background-color: var(--primary, #df7b42); filter: brightness(.92); }
+      button.primary:active { filter: brightness(.84); }
+      select { appearance: none; padding-right: 2.4rem; background-image: linear-gradient(45deg, transparent 50%, var(--surface-foreground, currentColor) 50%), linear-gradient(135deg, var(--surface-foreground, currentColor) 50%, transparent 50%); background-position: calc(100% - 1.45rem) 50%, calc(100% - 1.17rem) 50%; background-size: .3rem .3rem; background-repeat: no-repeat; }
+      :focus-visible { outline: 2px solid var(--interactive-focus-ring, #df7b42); outline-offset: 2px; }
+      button:disabled { cursor: wait; opacity: .65; }
+      .actions { display: flex; justify-content: flex-end; gap: .65rem; margin-top: 1rem; }
+      .error { color: var(--status-error, #ef5547); }
+      .muted { color: var(--surface-muted-foreground, #9a978e); }
+      .tree { padding-left: 1.2rem; }
+      h2 { font-size: 1rem; margin: 1.5rem 0 .65rem; text-transform: uppercase; letter-spacing: .08em; color: var(--surface-muted-foreground, #9a978e); }
+      .team-card.selected { border: 2px solid var(--primary, #df7b42); }
+      .team-top { display: flex; justify-content: space-between; gap: .5rem; align-items: center; font-size: 1.2rem; }
+      .team-top strong { display: flex; align-items: center; gap: 1rem; }
+      .team-top strong::before { content: ""; width: 1.6rem; height: 1.6rem; flex: 0 0 1.6rem; border: 2px solid var(--surface-muted-foreground, #9a978e); border-radius: 50%; }
+      .team-card.selected .team-top strong::before { border-color: var(--primary, #df7b42); background: radial-gradient(circle, var(--primary, #df7b42) 0 38%, transparent 42%); }
+      .badge { color: var(--status-success, #7db84e); background: color-mix(in srgb, var(--status-success, #7db84e) 16%, var(--surface-elevated, #1b1918)); border-radius: 999px; padding: .3rem .8rem; font-size: .8rem; }
+      .team-card .actions { justify-content: flex-start; flex-wrap: wrap; margin-left: 2.9rem; margin-top: .3rem; }
+      .team-card .actions button { min-height: 2.8rem; padding: .4rem 1rem; }
+      .danger { color: var(--status-error, #ef5547); }
+      .wizard { display: flex; align-items: center; justify-content: space-between; gap: .5rem; overflow-x: auto; padding: 1rem 0; margin: 1rem -2rem; border-block: 1px solid var(--interactive-border, #292625); }
+      .wizard span { white-space: nowrap; color: var(--surface-muted-foreground, #9a978e); }
+      .wizard .current { color: var(--primary, #df7b42); font-weight: 650; }
+      .wizard .done { color: var(--status-success, #7db84e); }
+      .wizard i { color: var(--interactive-border, #393634); font-style: normal; }
+      .choices { display: flex; flex-wrap: wrap; gap: .4rem; padding: .3rem 0 .6rem; }
+      .choices .row { padding: .35rem .5rem; border: 1px solid var(--interactive-border, #292625); border-radius: .6rem; }
+      .choices input { min-height: auto; }
+      .team-card { cursor: pointer; }
+      .team-card .muted { margin: .7rem 0; margin-left: 2.9rem; font-size: 1rem; }
+      .status { margin-top: .7rem; }
+      .back { margin-bottom: 1rem; }
+      .back button { border: 0; padding: 0; min-height: auto; background: transparent; color: var(--primary, #df7b42); }
+      .card .field { min-width: 0; flex: 1; }
+      .member-row { display: flex; align-items: end; gap: .65rem; }
+      .member-row .field { min-width: 0; flex: 1; margin: .5rem 0; }
+      .member-remove { align-self: end; margin-bottom: .5rem; background: transparent; }
+      .domain-heading { align-items: flex-end; }
+      .domain-heading .field { margin-bottom: 1rem; }
+      .domain-remove { margin-bottom: 1rem; background: transparent; border-color: transparent; }
+      .domain-remove:hover { background: var(--interactive-hover, #292625); }
+      .row input[type="checkbox"] { width: auto; }
+      [data-form] { padding: .2rem 0 0; }
+      [data-form] > h2 { margin-top: .5rem; color: var(--surface-foreground, #e8e4dc); text-transform: none; letter-spacing: 0; font-size: 1.2rem; }
+      [data-form] > p { margin-top: 0; }
+      [data-form] > .field { display: inline-grid; width: calc(50% - .75rem); vertical-align: top; margin: 1rem .5rem 1.5rem 0; }
+      [data-form] > .row { padding: 1rem; border: 1px solid var(--interactive-border, #292625); border-radius: 1rem; }
+      [data-form] ul { padding-left: 1rem; }
+      [data-form] ul ul { padding-left: .8rem; }
+      @media (max-width: 600px) {
+        body { padding: 1rem; }
+        .brand-icon { width: 3rem; height: 3rem; }
+        .project { font-size: .75rem; }
+        .wizard { justify-content: flex-start; margin-inline: -1rem; padding-inline: 1rem; }
+        [data-form] > .field { width: 100%; margin-right: 0; }
+        .team-card .actions, .team-card .muted { margin-left: 0; }
+        .team-top { align-items: flex-start; }
+      }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main id="app" aria-live="polite"><p>Loading Orchestra…</p></main>
+    <script src="./main.js"></script>
+  </body>
+</html>
