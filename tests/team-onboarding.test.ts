@@ -198,6 +198,42 @@ describe("Orchestra team setup smoke tests", () => {
 
   })
 
+  test("session status exposes the active saved team to a reopened panel", async () => {
+    await activate({
+      requestId: "a6592735-5152-4a4f-a08e-331d7cc6d829",
+      savedTeamId: "saved-team",
+    })
+    const { url, token } = JSON.parse(await readFile(
+      join(serviceDataDirectory, "activation-service.json"),
+      "utf8",
+    ))
+    const response = await fetch(`${url}/v1/sessions/main/team`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      active: true,
+      savedTeamId: "saved-team",
+      lead,
+      roster,
+      domains,
+    })
+  })
+
+  test("session status reports when no team is active", async () => {
+    const { url, token } = JSON.parse(await readFile(
+      join(serviceDataDirectory, "activation-service.json"),
+      "utf8",
+    ))
+    const response = await fetch(`${url}/v1/sessions/main/team`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ active: false })
+  })
+
   test("activation failure is recorded without exposing its error details", async () => {
     failSwitch = true
     const requestId = "f6c59afd-8e32-4f63-b2dc-595e2c5d6e3f"

@@ -41,6 +41,7 @@ export type TeamDocument = {
     leadMemberId: string
     createdAt: string
     originalAgent: string
+    savedTeamId?: string
   }
   teamMembers: Array<{
     id: string
@@ -133,6 +134,9 @@ export function validateTeamDocument(value: unknown): asserts value is TeamDocum
   const runID = requiredString(run.id, "teamRun.id")
   requiredString(run.leadMemberId, "teamRun.leadMemberId")
   requiredString(run.originalAgent, "teamRun.originalAgent")
+  if (run.savedTeamId !== undefined) {
+    requiredString(run.savedTeamId, "teamRun.savedTeamId")
+  }
   if (!Number.isFinite(Date.parse(requiredString(run.createdAt, "teamRun.createdAt")))) {
     invalidTeam("teamRun.createdAt is not a date")
   }

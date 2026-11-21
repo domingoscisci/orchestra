@@ -28102,6 +28102,9 @@ function validateTeamDocument(value3) {
   const runID = requiredString(run4.id, "teamRun.id");
   requiredString(run4.leadMemberId, "teamRun.leadMemberId");
   requiredString(run4.originalAgent, "teamRun.originalAgent");
+  if (run4.savedTeamId !== undefined) {
+    requiredString(run4.savedTeamId, "teamRun.savedTeamId");
+  }
   if (!Number.isFinite(Date.parse(requiredString(run4.createdAt, "teamRun.createdAt")))) {
     invalidTeam("teamRun.createdAt is not a date");
   }
@@ -28422,7 +28425,7 @@ async function writeReceipt(storage, receipt) {
   const next = [receipt, ...receipts.filter((item) => item.requestId !== receipt.requestId)].slice(0, 50);
   await storage.set(ACTIVATION_RECEIPTS_KEY, next);
 }
-async function createActivationServer(storage) {
+async function createActivationServer(storage, session) {
   const dataDirectory = orchestraDataDirectory();
   const discoveryPath = join(dataDirectory, "activation-service.json");
   const token = randomUUID();
@@ -28433,6 +28436,46 @@ async function createActivationServer(storage) {
     }
     if (request3.method === "GET" && request3.url === "/health") {
       response2.writeHead(200, { "content-type": "application/json" }).end('{"ready":true,"service":"orchestra-activation","version":1}');
+      return;
+    }
+    const sessionMatch = request3.method === "GET" && request3.url?.match(/^\/v1\/sessions\/([^/]+)\/team$/);
+    if (sessionMatch) {
+      try {
+        const sessionID = decodeURIComponent(sessionMatch[1]);
+        const current = await session.get({ sessionID });
+        if (current.id !== sessionID)
+          throw new Error("Session ID mismatch");
+        const context3 = await findTeamContext(storage, session, current);
+        const team = context3?.team;
+        if (!team) {
+          response2.writeHead(200, {
+            "content-type": "application/json",
+            "cache-control": "no-store"
+          }).end('{"active":false}');
+          return;
+        }
+        const lead = team.teamMembers.find((member) => member.id === team.teamRun.leadMemberId);
+        const members = new Map(team.teamMembers.map((member) => [member.id, member]));
+        response2.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        }).end(JSON.stringify({
+          active: true,
+          savedTeamId: team.teamRun.savedTeamId,
+          lead: lead.role,
+          roster: team.teamMembers.filter((member) => member.id !== lead.id).map(({ name, role }) => ({ name, agent: role })),
+          domains: team.domains.map((domain) => ({
+            name: domain.name,
+            lead: members.get(domain.leadMemberId).name,
+            members: domain.memberIds.map((id2) => members.get(id2).name)
+          }))
+        }));
+      } catch {
+        response2.writeHead(503, {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        }).end('{"error":"session_status_unavailable"}');
+      }
       return;
     }
     const match8 = request3.method === "GET" && request3.url?.match(/^\/v1\/activations\/([0-9a-f-]{36})$/i);
@@ -28499,11 +28542,11 @@ async function createActivationServer(storage) {
 }
 var activationService;
 var activationServiceStarting;
-async function startActivationServer(storage) {
+async function startActivationServer(storage, session) {
   if (activationService) {
     activationService.users++;
   } else {
-    activationServiceStarting ??= createActivationServer(storage);
+    activationServiceStarting ??= createActivationServer(storage, session);
     try {
       const stop = await activationServiceStarting;
       if (activationService)
@@ -28799,7 +28842,7 @@ async function serializeTeam(queues, key5, operation) {
       queues.delete(key5);
   }
 }
-function createTeamDocument(current, leadRole, originalAgent, roster, domains, childSessions, createdAt = new Date().toISOString()) {
+function createTeamDocument(current, leadRole, originalAgent, roster, domains, childSessions, savedTeamId, createdAt = new Date().toISOString()) {
   const runId = randomUUID();
   const plan = planTeamStructure(leadRole, roster, domains);
   const leadMember = {
@@ -28837,7 +28880,8 @@ function createTeamDocument(current, leadRole, originalAgent, roster, domains, c
       id: runId,
       leadMemberId: leadMember.id,
       createdAt,
-      originalAgent
+      originalAgent,
+      ...savedTeamId ? { savedTeamId } : {}
     },
     teamMembers: members,
     domains: domains.map((domain) => ({
@@ -28886,7 +28930,7 @@ var src_default = exports_plugin.define({
     const executions = new Map;
     const teamQueues = new Map;
     const eventController = new AbortController;
-    const stopActivationServer = await startActivationServer(storage);
+    const stopActivationServer = await startActivationServer(storage, session);
     (async () => {
       for await (const event of ctx.event.subscribe({ signal: eventController.signal })) {
         trackExecution(executions, event);
@@ -29056,6 +29100,7 @@ var src_default = exports_plugin.define({
               },
               approved: { type: "boolean" },
               requestId: { type: "string", format: "uuid" },
+              savedTeamId: { type: "string", minLength: 1, maxLength: 128 },
               teamGuideMode: { type: "string", enum: ["overwrite", "append"] }
             },
             required: ["lead", "roster", "domains", "approved"],
@@ -29134,7 +29179,7 @@ var src_default = exports_plugin.define({
                     createdByName.set(member.name.trim().toLowerCase(), child);
                   }
                   const sessionsByRoster = input.roster.map((member) => createdByName.get(member.name.trim().toLowerCase()));
-                  const team = createTeamDocument(current, input.lead, originalAgent, input.roster, input.domains, sessionsByRoster);
+                  const team = createTeamDocument(current, input.lead, originalAgent, input.roster, input.domains, sessionsByRoster, input.savedTeamId);
                   stateWriteStarted = true;
                   await storage.set(key5, team);
                   for (let index2 = 0;index2 < input.roster.length; index2++) {

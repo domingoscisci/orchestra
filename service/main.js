@@ -27,7 +27,9 @@ var server = createServer(async (request, response) => {
     return;
   }
   const match = request.method === "GET" && request.url?.match(/^\/v1\/activations\/([0-9a-f-]{36})$/i);
-  if (!match) {
+  const sessionMatch = request.method === "GET" && request.url?.match(/^\/v1\/sessions\/([^/]+)\/team$/);
+  const path = match ? `/v1/activations/${match[1]}` : sessionMatch ? request.url : undefined;
+  if (!path) {
     response.writeHead(404).end();
     return;
   }
@@ -38,7 +40,7 @@ var server = createServer(async (request, response) => {
       response.writeHead(503).end();
       return;
     }
-    const upstream = await fetch(`${endpoint.origin}/v1/activations/${match[1]}`, {
+    const upstream = await fetch(`${endpoint.origin}${path}`, {
       headers: { authorization: `Bearer ${discovery.token}` },
       signal: AbortSignal.timeout(2500)
     });

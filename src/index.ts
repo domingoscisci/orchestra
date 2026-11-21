@@ -83,7 +83,7 @@ async function writeReceipt(storage: TeamStorage, receipt: ActivationReceipt) {
   await storage.set(ACTIVATION_RECEIPTS_KEY, next as unknown as TeamDocument)
 }
 
-async function createActivationServer(storage: TeamStorage) {
+async function createActivationServer(storage: TeamStorage, session: SessionAPI) {
   const dataDirectory = orchestraDataDirectory()
   const discoveryPath = join(dataDirectory, "activation-service.json")
   const token = randomUUID()
@@ -95,6 +95,51 @@ async function createActivationServer(storage: TeamStorage) {
     if (request.method === "GET" && request.url === "/health") {
       response.writeHead(200, { "content-type": "application/json" })
         .end('{"ready":true,"service":"orchestra-activation","version":1}')
+      return
+    }
+    const sessionMatch = request.method === "GET" &&
+      request.url?.match(/^\/v1\/sessions\/([^/]+)\/team$/)
+    if (sessionMatch) {
+      try {
+        const sessionID = decodeURIComponent(sessionMatch[1])
+        const current = await session.get({ sessionID })
+        if (current.id !== sessionID) throw new Error("Session ID mismatch")
+        const context = await findTeamContext(storage, session, current)
+        const team = context?.team
+        if (!team) {
+          response.writeHead(200, {
+            "content-type": "application/json",
+            "cache-control": "no-store",
+          }).end('{"active":false}')
+          return
+        }
+        const lead = team.teamMembers.find((member) =>
+          member.id === team.teamRun.leadMemberId,
+        )!
+        const members = new Map(team.teamMembers.map((member) =>
+          [member.id, member] as const,
+        ))
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        }).end(JSON.stringify({
+          active: true,
+          savedTeamId: team.teamRun.savedTeamId,
+          lead: lead.role,
+          roster: team.teamMembers.filter((member) => member.id !== lead.id)
+            .map(({ name, role }) => ({ name, agent: role })),
+          domains: team.domains.map((domain) => ({
+            name: domain.name,
+            lead: members.get(domain.leadMemberId)!.name,
+            members: domain.memberIds.map((id) => members.get(id)!.name),
+          })),
+        }))
+      } catch {
+        response.writeHead(503, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        }).end('{"error":"session_status_unavailable"}')
+      }
       return
     }
     const match = request.method === "GET" &&
@@ -166,11 +211,11 @@ async function createActivationServer(storage: TeamStorage) {
 let activationService: { stop: () => Promise<void>; users: number } | undefined
 let activationServiceStarting: Promise<() => Promise<void>> | undefined
 
-async function startActivationServer(storage: TeamStorage) {
+async function startActivationServer(storage: TeamStorage, session: SessionAPI) {
   if (activationService) {
     activationService.users++
   } else {
-    activationServiceStarting ??= createActivationServer(storage)
+    activationServiceStarting ??= createActivationServer(storage, session)
     try {
       const stop = await activationServiceStarting
       if (activationService) activationService.users++
@@ -540,6 +585,7 @@ function createTeamDocument(
   roster: TeamRosterEntry[],
   domains: TeamDomain[],
   childSessions: SessionInfo[],
+  savedTeamId?: string,
   createdAt = new Date().toISOString(),
 ): TeamDocument {
   const runId = randomUUID()
@@ -581,6 +627,7 @@ function createTeamDocument(
       leadMemberId: leadMember.id,
       createdAt,
       originalAgent,
+      ...(savedTeamId ? { savedTeamId } : {}),
     },
     teamMembers: members,
     domains: domains.map((domain) => ({
@@ -637,7 +684,7 @@ export default Plugin.define({
     const executions = new Map<string, boolean>()
     const teamQueues = new Map<string, Promise<void>>()
     const eventController = new AbortController()
-    const stopActivationServer = await startActivationServer(storage)
+    const stopActivationServer = await startActivationServer(storage, session)
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: eventController.signal })) {
         trackExecution(executions, event)
@@ -827,6 +874,7 @@ export default Plugin.define({
             },
             approved: { type: "boolean" },
             requestId: { type: "string", format: "uuid" },
+            savedTeamId: { type: "string", minLength: 1, maxLength: 128 },
             teamGuideMode: { type: "string", enum: ["overwrite", "append"] },
           },
           required: ["lead", "roster", "domains", "approved"],
@@ -839,6 +887,7 @@ export default Plugin.define({
             domains: TeamDomain[]
             approved: boolean
             requestId?: string
+            savedTeamId?: string
             teamGuideMode?: "overwrite" | "append"
           }
           const requestId = input.requestId
@@ -933,6 +982,7 @@ export default Plugin.define({
                 input.roster,
                 input.domains,
                 sessionsByRoster,
+                input.savedTeamId,
               )
               stateWriteStarted = true
               await storage.set(key, team)
