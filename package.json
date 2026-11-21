@@ -25,7 +25,8 @@
         "id": "orchestra",
         "name": "Orchestra",
         "icon": "panel/icon.svg",
-        "entry": "panel/index.html"
+        "entry": "panel/index.html",
+        "mobile": true
       },
       "opencodePlugin": "plugin",
       "service": {

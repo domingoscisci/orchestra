@@ -8,9 +8,10 @@ with an acknowledgment/report lifecycle, and child-session management tools.
 The extension embeds the OpenCode plugin and provides a panel for managing
 multiple team configurations.
 Build it with `npm run build:extension`, then install this repository folder
-from Settings → Extensions → Add. Activation confirmation requires the
-OpenChamber desktop local-service permission. Web compatibility is not yet
-validated; mobile, VS Code, and direct OpenCode hosts are out of scope.
+from Settings → Extensions → Add. The panel opts into OpenChamber's mobile
+workspace; mobile service access and activation still depend on the connected
+OpenChamber server and its permissions. Web compatibility is not yet validated;
+VS Code and direct OpenCode hosts are out of scope.
 
 The panel creates, edits, selects, activates, and deletes teams in the
 repository's `.team.yml` file. The versioned YAML document can hold multiple

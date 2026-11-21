@@ -38,6 +38,13 @@ type SavedTeam = {
   domains: Domain[]
 }
 type TeamStore = { version: 1; teams: SavedTeam[] }
+type SessionTeamStatus = {
+  active: boolean
+  savedTeamId?: string
+  lead?: string
+  roster?: Member[]
+  domains?: Domain[]
+}
 type ActivationStatus = {
   requestId: string
   teamId: string
@@ -52,7 +59,9 @@ let activation: ActivationStatus | null = null
 let pollGeneration = 0
 let projectDirectory: string | null = null
 let readyDirectory: string | null = null
+let readySessionId: string | null = null
 let initialized = false
+let contextGeneration = 0
 let teamStore: TeamStore = { version: 1, teams: [] }
 let selectedTeamId = ""
 let activeTeamId = ""
@@ -103,18 +112,76 @@ function drawActivationStatus() {
   const target = root.querySelector<HTMLElement>("[data-activation]")
   if (!target || !activation) return
   const text = activation.state === "pending"
-    ? `Attivazione di “${activation.teamName}” in corso…`
+    ? `Activating “${activation.teamName}”…`
     : activation.state === "activated"
-      ? `Team “${activation.teamName}” attivato.`
+      ? `Team “${activation.teamName}” activated.`
       : activation.state === "failed"
-        ? "Attivazione non riuscita. Controlla la configurazione e riprova."
-        : `Esito non disponibile per “${activation.teamName}”. ${activation.error ?? "Il servizio potrebbe non essere autorizzato o raggiungibile."}`
+        ? "Activation failed. Check the configuration and try again."
+        : `Status unavailable for “${activation.teamName}”. ${activation.error ?? "The service may be unauthorized or unreachable."}`
   target.innerHTML = `<p role="status">${esc(text)}</p>${
     activation.state === "unknown"
-      ? '<button type="button" data-recheck>Controlla di nuovo</button>' : ""
+      ? '<button type="button" data-recheck>Check again</button>' : ""
   }`
   target.querySelector<HTMLButtonElement>("[data-recheck]")
     ?.addEventListener("click", () => void pollActivation(true))
+}
+
+function teamSignature(team: {
+  lead: string
+  roster: Member[]
+  domains: Domain[]
+}) {
+  const members = team.roster.map(({ name, agent }) =>
+    [name.trim().toLowerCase(), agent] as const,
+  ).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  const domains = team.domains.map(({ name, lead, members }) => [
+    name.trim().toLowerCase(),
+    lead.trim().toLowerCase(),
+    members.map((member) => member.trim().toLowerCase()).sort(),
+  ] as const).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  return JSON.stringify([team.lead, members, domains])
+}
+
+async function readActiveTeam(
+  sessionId: string,
+  generation: number,
+): Promise<string> {
+  try {
+    const response = await host.serviceRequest({
+      method: "GET",
+      path: `/v1/sessions/${encodeURIComponent(sessionId)}/team`,
+    })
+    if (generation !== contextGeneration) return ""
+    if (response.status !== 200) throw new Error("Could not read session team")
+    const status = JSON.parse(response.body) as SessionTeamStatus
+    if (!status.active) return ""
+
+    const matchById = status.savedTeamId
+      ? teamStore.teams.find((team) => team.id === status.savedTeamId)
+      : undefined
+    const matches = status.lead && status.roster && status.domains
+      ? teamStore.teams.filter((team) =>
+        teamSignature({
+          lead: team.lead.agent,
+          roster: team.roster,
+          domains: team.domains,
+        }) === teamSignature({
+          lead: status.lead!,
+          roster: status.roster!,
+          domains: status.domains!,
+        }),
+      )
+      : []
+    const match = matchById ?? (matches.length === 1 ? matches[0] : undefined)
+    if (match) {
+      activeTeamId = match.id
+      return ""
+    }
+    return "A team is active in this session, but it does not match a saved configuration."
+  } catch {
+    if (generation !== contextGeneration) return ""
+    return "The team status could not be verified. The Orchestra service is unavailable or unauthorized."
+  }
 }
 
 async function pollActivation(recheck = false) {
@@ -155,8 +222,8 @@ async function pollActivation(recheck = false) {
       activation.state = "unknown"
       const code = (error as { code?: string })?.code
       activation.error = code === "NOT_GRANTED" || code === "NO_SERVICE"
-        ? "Autorizza il servizio Orchestra nelle impostazioni dell’estensione."
-        : "Il servizio Orchestra non è raggiungibile."
+        ? "Authorize the Orchestra service in the extension settings."
+        : "The Orchestra service is unreachable."
       drawActivationStatus()
       return
     }
@@ -201,7 +268,7 @@ async function readTeamStore() {
     const { content } = await host.readFile(TEAM_FILE)
     const parsed = parseYaml(content) as Partial<TeamStore>
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.teams)) {
-      throw new Error("Formato .team.yml non valido: atteso version: 1 e teams.")
+      throw new Error("Invalid .team.yml format: expected version: 1 and teams.")
     }
     const ids = new Set<string>()
     for (const team of parsed.teams) {
@@ -216,7 +283,7 @@ async function readTeamStore() {
           typeof domain.name !== "string" || typeof domain.lead !== "string" ||
           !Array.isArray(domain.members) ||
           domain.members.some((member) => typeof member !== "string"))) {
-        throw new Error("Formato .team.yml non valido: controlla ID, lead, roster e domini.")
+        throw new Error("Invalid .team.yml format: check IDs, lead, roster, and domains.")
       }
       ids.add(team.id)
     }
@@ -231,7 +298,7 @@ async function readTeamStore() {
 }
 
 async function writeTeamStore() {
-  if (!projectDirectory) throw new Error("Apri prima un progetto.")
+  if (!projectDirectory) throw new Error("Open a project first.")
   teamStore.teams.sort((a, b) => a.name.localeCompare(b.name))
   await host.writeFile(TEAM_FILE, stringifyYaml(teamStore, { lineWidth: 100 }))
 }
@@ -317,29 +384,29 @@ function suggestedMemberNames(roster: Member[]) {
 function renderManager(message = "") {
   const cards = teamStore.teams.map((team) => `
     <article class="card team-card${team.id === selectedTeamId ? " selected" : ""}" data-team="${esc(team.id)}">
-      <div class="team-top"><strong>${esc(team.name)}</strong>${team.id === activeTeamId ? '<span class="badge">Attivato</span>' : ""}</div>
-      <p class="muted">Lead: ${esc(team.lead.name)} · ${team.roster.length} membri · ${team.domains.length} domini</p>
+      <div class="team-top"><strong>${esc(team.name)}</strong>${team.id === activeTeamId ? '<span class="badge">Active</span>' : ""}</div>
+      <p class="muted">Lead: ${esc(team.lead.name)} · ${team.roster.length} members · ${team.domains.length} domains</p>
       <div class="actions">
-        <button class="primary" data-activate="${esc(team.id)}">Attiva team</button>
-        <button data-edit="${esc(team.id)}">Modifica</button>
-        <button class="danger" data-delete="${esc(team.id)}">Elimina</button>
+        <button class="primary" data-activate="${esc(team.id)}">Activate team</button>
+        <button data-edit="${esc(team.id)}">Edit</button>
+        <button class="danger" data-delete="${esc(team.id)}">Delete</button>
       </div>
     </article>`).join("")
   root.innerHTML = `
-    <header class="brand"><span class="brand-icon">O</span><div><h1>Orchestra</h1><small>Gestione team</small></div><span class="project">⌂ ${esc(projectDirectory?.split(/[\\/]/).filter(Boolean).pop() ?? "Nessun progetto")}</span></header>
-    <p class="intro">${projectDirectory ? "Scegli una configurazione da attivare nel progetto corrente." : "Apri un progetto per gestire le configurazioni."}</p>
-    <div class="actions"><button class="primary" data-new>＋ Nuovo team</button><button data-refresh>Ricarica</button></div>
-    <h2>Team salvati <span class="muted">(${teamStore.teams.length})</span></h2>
-    ${cards || '<p class="muted">Nessun team salvato. Creane uno per iniziare.</p>'}
+    <header class="brand"><span class="brand-icon">O</span><div><h1>Orchestra</h1><small>Team management</small></div><span class="project">⌂ ${esc(projectDirectory?.split(/[\\/]/).filter(Boolean).pop() ?? "No project")}</span></header>
+    <p class="intro">${projectDirectory ? "Choose a configuration to activate in the current project." : "Open a project to manage configurations."}</p>
+    <div class="actions"><button class="primary" data-new>＋ New team</button><button data-refresh>Refresh</button></div>
+    <h2>Saved teams <span class="muted">(${teamStore.teams.length})</span></h2>
+    ${cards || '<p class="muted">No saved teams. Create one to get started.</p>'}
     <p class="muted" role="status" data-status>${esc(message)}</p>
     <section data-activation aria-live="polite"></section>
-    <p class="footnote">Il team selezionato viene inviato all’agente nella chat; il plugin convalida la configurazione e avvia le sessioni.</p>`
+    <p class="footnote">The selected team is sent to the chat agent; the plugin validates the configuration and starts the sessions.</p>`
   drawActivationStatus()
   root.querySelector("[data-new]")?.addEventListener("click", () => renderEditor())
   root.querySelector("[data-refresh]")?.addEventListener("click", async () => {
     try {
       await Promise.all([readTeamStore(), readProjectAgents()])
-      renderManager("Configurazioni e ruoli ricaricati.")
+      renderManager("Configurations and roles refreshed.")
     }
     catch (error) { renderManager(error instanceof Error ? error.message : String(error)) }
   })
@@ -355,11 +422,11 @@ function renderManager(message = "") {
   root.querySelectorAll<HTMLButtonElement>("[data-delete]").forEach((item) =>
     item.addEventListener("click", async () => {
       const team = teamStore.teams.find((entry) => entry.id === item.dataset.delete)
-      if (!team || !confirm(`Eliminare “${team.name}” da .team.yml?`)) return
+      if (!team || !confirm(`Delete “${team.name}” from .team.yml?`)) return
       teamStore.teams = teamStore.teams.filter((entry) => entry.id !== team.id)
       if (selectedTeamId === team.id) selectedTeamId = ""
       if (activeTeamId === team.id) activeTeamId = ""
-      try { await writeTeamStore(); renderManager("Team eliminato.") }
+      try { await writeTeamStore(); renderManager("Team deleted.") }
       catch (error) { renderManager(error instanceof Error ? error.message : String(error)) }
     }))
   root.querySelectorAll<HTMLButtonElement>("[data-activate]").forEach((item) =>
@@ -370,13 +437,13 @@ function renderManager(message = "") {
       item.disabled = true
       try {
         const requestId = crypto.randomUUID()
-        const request = `Attiva questo team Orchestra nel progetto corrente usando orchestra.activate_team. Usa esattamente requestId "${requestId}". Configurazione approvata dall'utente: ${JSON.stringify({
+        const request = `Activate this Orchestra team in the current project using orchestra.activate_team. Use exactly requestId "${requestId}". User-approved configuration: ${JSON.stringify({
           lead: team.lead.agent, roster: team.roster, domains: team.domains,
-          approved: true, requestId,
-        })}. Non modificare la configurazione. Se esiste TEAM.md e serve una scelta di aggiornamento, chiedi prima all'utente.`
+          approved: true, requestId, savedTeamId: team.id,
+        })}. Do not modify the configuration. If TEAM.md exists and an update choice is needed, ask the user first.`
         await host.prompt({ text: request, send: true })
         activation = { requestId, teamId: team.id, teamName: team.name, state: "pending" }
-        renderManager("Richiesta inviata alla chat.")
+        renderManager("Request sent to chat.")
         void pollActivation()
       } catch (error) {
         item.disabled = false
@@ -392,17 +459,17 @@ function renderEditor(id?: string) {
   }
   let stage = 0
   const draw = () => {
-    const stageNames = ["Team Lead", "Membri", "Domini", "Riepilogo"]
+    const stageNames = ["Team Lead", "Members", "Domains", "Review"]
     root.innerHTML = `
-      <header class="brand"><span class="brand-icon">O</span><div><h1>Orchestra</h1><small>Gestione team</small></div><span class="project">⌂ ${esc(projectDirectory?.split(/[\\/]/).filter(Boolean).pop() ?? "Nessun progetto")}</span></header>
+      <header class="brand"><span class="brand-icon">O</span><div><h1>Orchestra</h1><small>Team management</small></div><span class="project">⌂ ${esc(projectDirectory?.split(/[\\/]/).filter(Boolean).pop() ?? "No project")}</span></header>
       <section class="editor">
-      <div class="back"><button data-back>‹ Team salvati</button></div>
-      <h1>${current ? "Modifica team" : "Crea un team"}</h1>
-      <p class="muted">Configuralo in pochi passaggi. Potrai salvarlo e attivarlo quando vuoi.</p>
+      <div class="back"><button data-back>‹ Saved teams</button></div>
+      <h1>${current ? "Edit team" : "Create a team"}</h1>
+      <p class="muted">Set it up in a few steps. Save it and activate it whenever you need.</p>
       <nav class="wizard">${stageNames.map((name, index) => `<span class="${index === stage ? "current" : index < stage ? "done" : ""}">${index < stage ? "✓" : index + 1} ${name}</span>`).join("<i>›</i>")}</nav>
       <section data-form></section><p class="error" data-status role="status"></p>
-      <div class="actions"><button data-cancel>Annulla</button>${stage > 0 ? '<button data-prev>← Indietro</button>' : ""}<button class="primary" data-next>${stage === 3 ? "Salva team" : "Continua →"}</button></div></section>
-      <p class="step-note">Passaggio ${stage + 1} di 4 · Nessuna sessione verrà avviata fino a “Attiva team”.</p>`
+      <div class="actions"><button data-cancel>Cancel</button>${stage > 0 ? '<button data-prev>← Back</button>' : ""}<button class="primary" data-next>${stage === 3 ? "Save team" : "Continue →"}</button></div></section>
+      <p class="step-note">Step ${stage + 1} of 4 · No sessions will start until you select “Activate team”.</p>`
     root.querySelector("[data-back]")!.addEventListener("click", () => renderManager())
     root.querySelector("[data-cancel]")!.addEventListener("click", () => renderManager())
     root.querySelector("[data-prev]")?.addEventListener("click", () => {
@@ -424,12 +491,12 @@ function renderEditor(id?: string) {
       }
       const leadAgent = projectAgents.find((agent) => agent.id === draft.lead.agent)
       if (!current && leadAgent && !draft.lead.name) draft.lead.name = leadAgent.name
-      form.innerHTML = `<h2>Impostazioni iniziali</h2><p class="muted">Scegli chi coordinerà il team.</p>
-        <label class="field">Ruolo del Team Lead<select data-lead-role><option value="">Scegli un ruolo…</option>${projectAgents.filter((agent) => agent.mode === "primary" || agent.mode === "all").map((agent) => `<option value="${esc(agent.id)}"${agent.id === draft.lead.agent ? " selected" : ""}>${esc(agent.name)}</option>`).join("")}</select></label>
-        <label class="field">Nome del Team Lead<input data-lead-name value="${esc(draft.lead.name)}"></label>
+      form.innerHTML = `<h2>Team Lead</h2><p class="muted">Choose who will coordinate the team.</p>
+        <label class="field">Team Lead role<select data-lead-role><option value="">Choose a role…</option>${projectAgents.filter((agent) => agent.mode === "primary" || agent.mode === "all").map((agent) => `<option value="${esc(agent.id)}"${agent.id === draft.lead.agent ? " selected" : ""}>${esc(agent.name)}</option>`).join("")}</select></label>
+        <label class="field">Team Lead name<input data-lead-name value="${esc(draft.lead.name)}"></label>
         ${leadRoles || projectAgents.some((agent) => agent.mode === "primary" || agent.mode === "all")
-          ? "" : '<p class="error">Nessun agente Team Lead trovato. Aggiungi un file agente principale in .opencode/agents/ e ricarica.</p>'}
-        <label class="row"><input type="checkbox" data-solo${draft.solo ? " checked" : ""}> Team singolo</label>`
+          ? "" : '<p class="error">No eligible Team Lead agents found. Add a primary agent file in .opencode/agents/ and refresh.</p>'}
+        <label class="row"><input type="checkbox" data-solo${draft.solo ? " checked" : ""}> Solo team</label>`
       form.querySelector<HTMLSelectElement>("[data-lead-role]")!.addEventListener("change", (event) => {
         const agent = projectAgents.find((item) => item.id === (event.currentTarget as HTMLSelectElement).value)
         if (agent) form.querySelector<HTMLInputElement>("[data-lead-name]")!.value = agent.name
@@ -439,7 +506,7 @@ function renderEditor(id?: string) {
         agent.mode === "subagent" || agent.mode === "all",
       )
       const suggested = suggestedMemberNames(draft.roster)
-      form.innerHTML = `<h2>Costruisci il roster</h2><p class="muted">Aggiungi membri e assegna a ciascuno un ruolo agente.</p><div data-members>${draft.roster.map((member, i) => `<div class="member-row"><label class="field">Nome<input data-member-name="${i}" data-auto-name="${member.name === suggested[i]}" maxlength="80" value="${esc(member.name)}" placeholder="Es. API Engineer"></label><label class="field">Ruolo<select data-member-agent="${i}" data-previous-agent="${esc(member.agent)}"><option value="">Scegli un ruolo…</option>${agentOptions("roster", member.agent)}</select></label><button class="member-remove" data-remove="${i}" aria-label="Rimuovi membro">−</button></div>`).join("")}</div>${rosterRoles.length ? "" : '<p class="error">Nessun agente membro trovato. Aggiungi un file agente subagent in .opencode/agents/ e ricarica.</p>'}<button data-add${rosterRoles.length ? "" : " disabled"}>＋ Aggiungi membro</button>`
+      form.innerHTML = `<h2>Build the roster</h2><p class="muted">Add members and assign an agent role to each one.</p><div data-members>${draft.roster.map((member, i) => `<div class="member-row"><label class="field">Name<input data-member-name="${i}" data-auto-name="${member.name === suggested[i]}" maxlength="80" value="${esc(member.name)}" placeholder="e.g. API Engineer"></label><label class="field">Role<select data-member-agent="${i}" data-previous-agent="${esc(member.agent)}"><option value="">Choose a role…</option>${agentOptions("roster", member.agent)}</select></label><button class="member-remove" data-remove="${i}" aria-label="Remove member">−</button></div>`).join("")}</div>${rosterRoles.length ? "" : '<p class="error">No eligible member agents found. Add a subagent file in .opencode/agents/ and refresh.</p>'}<button data-add${rosterRoles.length ? "" : " disabled"}>＋ Add member</button>`
       form.querySelectorAll<HTMLInputElement>("[data-member-name]").forEach((input) =>
         input.addEventListener("input", () => { input.dataset.autoName = "false" }))
       form.querySelectorAll<HTMLSelectElement>("[data-member-agent]").forEach((select) =>
@@ -497,7 +564,7 @@ function renderEditor(id?: string) {
         }))
     } else if (stage === 2) {
       const members = draft.roster.map((member) => member.name)
-      form.innerHTML = `<h2>Definisci i domini</h2><p class="muted">I domini sono facoltativi. Ogni membro può appartenere a un solo dominio.</p><div data-domains>${draft.domains.map((domain, i) => `<div class="card"><div class="row domain-heading"><label class="field">Nome dominio<input data-domain-name="${i}" value="${esc(domain.name)}" placeholder="Es. API"></label><button class="domain-remove" data-domain-remove="${i}" aria-label="Rimuovi dominio">−</button></div><div class="choices">${members.map((member) => `<label class="row"><input type="checkbox" data-domain-member="${i}" value="${esc(member)}"${domain.members.includes(member) ? " checked" : ""}>${esc(member)}</label>`).join("")}</div><label class="field">Domain Lead<select data-domain-lead="${i}"><option value="">Scegli un membro…</option>${domain.members.map((member) => `<option value="${esc(member)}"${domain.lead === member ? " selected" : ""}>${esc(member)}</option>`).join("")}</select></label></div>`).join("")}</div><button data-domain-add>＋ Aggiungi dominio</button>`
+      form.innerHTML = `<h2>Define domains</h2><p class="muted">Optional. Each member can belong to only one domain.</p><div data-domains>${draft.domains.map((domain, i) => `<div class="card"><div class="row domain-heading"><label class="field">Domain name<input data-domain-name="${i}" value="${esc(domain.name)}" placeholder="e.g. API"></label><button class="domain-remove" data-domain-remove="${i}" aria-label="Remove domain">−</button></div><div class="choices">${members.map((member) => `<label class="row"><input type="checkbox" data-domain-member="${i}" value="${esc(member)}"${domain.members.includes(member) ? " checked" : ""}>${esc(member)}</label>`).join("")}</div><label class="field">Domain Lead<select data-domain-lead="${i}"><option value="">Choose a member…</option>${domain.members.map((member) => `<option value="${esc(member)}"${domain.lead === member ? " selected" : ""}>${esc(member)}</option>`).join("")}</select></label></div>`).join("")}</div><button data-domain-add>＋ Add domain</button>`
       form.querySelectorAll<HTMLInputElement>("[data-domain-name]").forEach((input) =>
         input.addEventListener("input", () => {
           draft.domains[Number(input.dataset.domainName)].name = input.value
@@ -510,7 +577,7 @@ function renderEditor(id?: string) {
             i !== index && domain.members.includes(name),
           )) {
             checkbox.checked = false
-            showError("Ogni membro può appartenere a un solo dominio.")
+            showError("Each member can belong to only one domain.")
             return
           }
           const domain = draft.domains[index]
@@ -534,11 +601,11 @@ function renderEditor(id?: string) {
       const memberAcronyms = new Map<string, string>()
       draft.roster.forEach((member) =>
         memberAcronyms.set(member.name, nextAcronym(member.name, usedAcronyms)))
-      form.innerHTML = `<h2>Rivedi il team</h2><label class="field">Nome del team<input data-name maxlength="80" value="${esc(draft.name)}" placeholder="Es. Product Platform"></label><div class="card"><strong>${esc(draft.name)}</strong><p>Gerarchia del team</p><ul><li>${esc(leadAcronym)} · ${esc(draft.lead.name)} <span class="muted">(${esc(draft.lead.agent)})</span><ul>${draft.domains.map((domain) => `<li>${esc(domain.name)} — Lead: ${esc(memberAcronyms.get(domain.lead) ?? "")} · ${esc(domain.lead)}<ul>${domain.members.filter((member) => member !== domain.lead).map((member) => `<li>${esc(memberAcronyms.get(member) ?? "")} · ${esc(member)}</li>`).join("")}</ul></li>`).join("")}${draft.roster.filter((member) => !assigned.has(member.name)).map((member) => `<li>${esc(memberAcronyms.get(member.name) ?? "")} · ${esc(member.name)} <span class="muted">(${esc(member.agent)})</span></li>`).join("")}</ul></li></ul></div><p class="muted">La configurazione verrà salvata in .team.yml. Nessuna sessione parte finché non premi “Attiva team”.</p>`
+       form.innerHTML = `<h2>Review the team</h2><label class="field">Team name<input data-name maxlength="80" value="${esc(draft.name)}" placeholder="e.g. Product Platform"></label><div class="card"><strong>${esc(draft.name)}</strong><p>Team hierarchy</p><ul><li>${esc(leadAcronym)} · ${esc(draft.lead.name)} <span class="muted">(${esc(draft.lead.agent)})</span><ul>${draft.domains.map((domain) => `<li>${esc(domain.name)} — Lead: ${esc(memberAcronyms.get(domain.lead) ?? "")} · ${esc(domain.lead)}<ul>${domain.members.filter((member) => member !== domain.lead).map((member) => `<li>${esc(memberAcronyms.get(member) ?? "")} · ${esc(member)}</li>`).join("")}</ul></li>`).join("")}${draft.roster.filter((member) => !assigned.has(member.name)).map((member) => `<li>${esc(memberAcronyms.get(member.name) ?? "")} · ${esc(member.name)} <span class="muted">(${esc(member.agent)})</span></li>`).join("")}</ul></li></ul></div><p class="muted">The configuration will be saved to .team.yml. No sessions start until you select “Activate team”.</p>`
       form.querySelector<HTMLInputElement>("[data-name]")!.addEventListener("input", (event) => {
         draft.name = (event.currentTarget as HTMLInputElement).value
         const heading = form.querySelector("strong")
-        if (heading) heading.textContent = draft.name || "Nuovo team"
+        if (heading) heading.textContent = draft.name || "New team"
       })
     }
     root.querySelector("[data-next]")!.addEventListener("click", async () => {
@@ -548,7 +615,7 @@ function renderEditor(id?: string) {
         draft.lead.agent = root.querySelector<HTMLSelectElement>("[data-lead-role]")!.value
         draft.solo = root.querySelector<HTMLInputElement>("[data-solo]")!.checked
         if (draft.solo) { draft.roster = []; draft.domains = [] }
-        if (!draft.lead.name || !draft.lead.agent) { status.textContent = "Inserisci il nome e seleziona un ruolo valido per il Team Lead."; return }
+        if (!draft.lead.name || !draft.lead.agent) { status.textContent = "Enter a name and select a valid role for the Team Lead."; return }
         if (draft.solo) { stage = 3; draw(); return }
       }
       if (stage === 1) {
@@ -557,10 +624,10 @@ function renderEditor(id?: string) {
           name: (name as HTMLInputElement).value.trim(),
           agent: (form.querySelector<HTMLSelectElement>(`[data-member-agent="${name.dataset.memberName}"]`)?.value ?? "").trim(),
         }))
-        if (draft.roster.some((member) => !member.name || !member.agent)) { status.textContent = "Completa nome e ruolo di ogni membro."; return }
-        if (!draft.roster.length) { status.textContent = "Aggiungi almeno un membro oppure seleziona Team singolo."; return }
+        if (draft.roster.some((member) => !member.name || !member.agent)) { status.textContent = "Enter a name and role for every member."; return }
+        if (!draft.roster.length) { status.textContent = "Add at least one member or select Solo team."; return }
         if (new Set(draft.roster.map((member) => member.name.toLocaleLowerCase())).size !== draft.roster.length) {
-          status.textContent = "I nomi dei membri devono essere univoci."
+          status.textContent = "Member names must be unique."
           return
         }
       }
@@ -568,7 +635,7 @@ function renderEditor(id?: string) {
         draft.domains = draft.domains.map((domain) => ({
           ...domain, name: domain.name.trim(), lead: domain.lead.trim(),
         }))
-        if (draft.domains.some((domain) => !domain.name || !domain.lead || !domain.members.length)) { status.textContent = "Completa i campi dei domini o rimuovi quelli vuoti."; return }
+        if (draft.domains.some((domain) => !domain.name || !domain.lead || !domain.members.length)) { status.textContent = "Complete each domain or remove empty domains."; return }
         const rosterNames = new Set(draft.roster.map((member) => member.name.toLocaleLowerCase()))
         const assigned = new Set<string>()
         for (const domain of draft.domains) {
@@ -578,7 +645,7 @@ function renderEditor(id?: string) {
             normalizedMembers.some((member) => !rosterNames.has(member)) ||
             new Set(normalizedMembers).size !== normalizedMembers.length ||
             normalizedMembers.some((member) => assigned.has(member))) {
-            status.textContent = `Controlla membri e responsabile del dominio “${domain.name}”.`
+            status.textContent = `Check the members and lead for the “${domain.name}” domain.`
             return
           }
           normalizedMembers.forEach((member) => assigned.add(member))
@@ -586,12 +653,12 @@ function renderEditor(id?: string) {
       }
       if (stage === 3) {
         draft.name = root.querySelector<HTMLInputElement>("[data-name]")!.value.trim()
-        if (!draft.name) { status.textContent = "Inserisci il nome del team."; return }
+        if (!draft.name) { status.textContent = "Enter a team name."; return }
       }
       if (stage < 3) { stage++; draw(); return }
       draft.id = current?.id ?? slug(draft.name)
-      if (!draft.id) { status.textContent = "Il nome del team deve contenere almeno una lettera o un numero."; return }
-      if (teamStore.teams.some((team) => team.id === draft.id && team.id !== current?.id)) { status.textContent = "Esiste già un team con questo nome."; return }
+      if (!draft.id) { status.textContent = "The team name must contain at least one letter or number."; return }
+      if (teamStore.teams.some((team) => team.id === draft.id && team.id !== current?.id)) { status.textContent = "A team with this name already exists."; return }
       const wasEditing = !!current
       if (current) teamStore.teams = teamStore.teams.map((team) => team.id === current.id ? draft : team)
       else teamStore.teams.push(draft)
@@ -599,7 +666,7 @@ function renderEditor(id?: string) {
         await writeTeamStore()
         selectedTeamId = draft.id
         if (wasEditing && activeTeamId === draft.id) activeTeamId = ""
-        renderManager(wasEditing ? "Modifiche salvate." : "Team creato e salvato.")
+        renderManager(wasEditing ? "Changes saved." : "Team created and saved.")
       } catch (error) {
         status.textContent = error instanceof Error ? error.message : String(error)
       }
@@ -829,15 +896,26 @@ function renderReview(config: Config, preview: Preview) {
 
 host.onReady(async (context) => {
   applyHostReady(context, document.documentElement)
-  if (initialized && context.directory === readyDirectory) return
-  if (initialized) { activeTeamId = ""; selectedTeamId = "" }
+  const sessionId = context.session?.id ?? null
+  if (initialized && context.directory === readyDirectory &&
+    sessionId === readySessionId) return
+  const generation = ++contextGeneration
+  if (initialized) {
+    activeTeamId = ""
+    selectedTeamId = ""
+    activation = null
+  }
   initialized = true
   readyDirectory = context.directory
+  readySessionId = sessionId
   projectDirectory = context.directory
   try {
     await Promise.all([readTeamStore(), readProjectAgents()])
-    renderManager()
+    const message = sessionId ? await readActiveTeam(sessionId, generation) : ""
+    if (generation !== contextGeneration) return
+    renderManager(message)
   } catch (error) {
+    if (generation !== contextGeneration) return
     renderManager(error instanceof Error ? error.message : String(error))
   }
 })

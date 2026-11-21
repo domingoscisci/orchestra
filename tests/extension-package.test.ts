@@ -11,6 +11,10 @@ test("extension manages YAML teams and prompts the plugin to activate them", asy
   const service = await readFile(new URL("../service/main.ts", import.meta.url), "utf8")
 
   expect(contributes.opencodePlugin).toBe("plugin")
+  expect(contributes.panel).toMatchObject({
+    entry: "panel/index.html",
+    mobile: true,
+  })
   expect(contributes.service).toEqual({
     entry: "service/main.js",
     runtime: "host",
@@ -23,8 +27,12 @@ test("extension manages YAML teams and prompts the plugin to activate them", asy
   expect(panel).toContain("stringifyYaml(teamStore")
   expect(panel).toContain('host.prompt({ text: request, send: true })')
   expect(panel).toContain("host.serviceRequest")
+  expect(panel).toContain('path: `/v1/sessions/${encodeURIComponent(sessionId)}/team`')
+  expect(panel).toContain("context.session?.id")
+  expect(panel).toContain("generation !== contextGeneration")
   expect(panel).toContain("crypto.randomUUID()")
   expect(service).toContain('request.url?.match(/^\\/v1\\/activations\\/')
+  expect(service).toContain('request.url?.match(/^\\/v1\\/sessions\\/')
   expect(service).toContain('endpoint.hostname !== "127.0.0.1"')
   expect(panel).toContain('await walk(".opencode/agents")')
   expect(panel).toContain('agent.id.includes("/") ? agent.id : agent.name')
