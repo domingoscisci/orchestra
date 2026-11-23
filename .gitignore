@@ -8,3 +8,4 @@ coverage/
 .stfolder/
 .stversions/
 .stignore
+/spike/
