@@ -2,6 +2,7 @@ import { connectHost } from "@openchamber/sdk"
 import { applyHostReady } from "@openchamber/sdk/ui"
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml"
 import { nextAcronym } from "../src/core"
+import { parseAgentFrontmatter } from "./agent-frontmatter"
 
 type Agent = {
   id: string
@@ -146,6 +147,8 @@ async function readActiveTeam(
   sessionId: string,
   generation: number,
 ): Promise<string> {
+  if (generation !== contextGeneration) return ""
+  activeTeamId = ""
   try {
     const response = await host.serviceRequest({
       method: "GET",
@@ -334,7 +337,7 @@ async function readProjectAgents() {
     const id = path.slice(".opencode/agents/".length).replace(/\.md$/i, "")
     const { content } = await host.readFile(path)
     const frontmatter = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s*\r?\n|$)/)
-    const raw = frontmatter ? parseYaml(frontmatter[1]) : {}
+    const raw = frontmatter ? parseAgentFrontmatter(frontmatter[1]) : {}
     const metadata = raw && typeof raw === "object"
       ? raw as Record<string, unknown> : {}
     const mode = metadata.mode === "subagent" || metadata.mode === "all" ||
@@ -404,11 +407,20 @@ function renderManager(message = "") {
   drawActivationStatus()
   root.querySelector("[data-new]")?.addEventListener("click", () => renderEditor())
   root.querySelector("[data-refresh]")?.addEventListener("click", async () => {
+    const generation = contextGeneration
     try {
       await Promise.all([readTeamStore(), readProjectAgents()])
-      renderManager("Configurations and roles refreshed.")
+      const message = readySessionId
+        ? await readActiveTeam(readySessionId, generation)
+        : ""
+      if (generation !== contextGeneration) return
+      renderManager(message || "Configurations and roles refreshed.")
     }
-    catch (error) { renderManager(error instanceof Error ? error.message : String(error)) }
+    catch (error) {
+      if (generation === contextGeneration) {
+        renderManager(error instanceof Error ? error.message : String(error))
+      }
+    }
   })
   root.querySelectorAll<HTMLElement>(".team-card").forEach((card) => {
     card.addEventListener("click", (event) => {
@@ -917,6 +929,17 @@ host.onReady(async (context) => {
   } catch (error) {
     if (generation !== contextGeneration) return
     renderManager(error instanceof Error ? error.message : String(error))
+  }
+})
+
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden || !readySessionId ||
+    !root.querySelector("[data-refresh]")) return
+  const generation = contextGeneration
+  const message = await readActiveTeam(readySessionId, generation)
+  if (generation === contextGeneration && !document.hidden &&
+    root.querySelector("[data-refresh]")) {
+    renderManager(message)
   }
 })
 

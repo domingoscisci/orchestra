@@ -28,6 +28,8 @@ test("extension manages YAML teams and prompts the plugin to activate them", asy
   expect(panel).toContain('host.prompt({ text: request, send: true })')
   expect(panel).toContain("host.serviceRequest")
   expect(panel).toContain('path: `/v1/sessions/${encodeURIComponent(sessionId)}/team`')
+  expect(panel).toContain("await readActiveTeam(readySessionId, generation)")
+  expect(panel).toContain('document.addEventListener("visibilitychange"')
   expect(panel).toContain("context.session?.id")
   expect(panel).toContain("generation !== contextGeneration")
   expect(panel).toContain("crypto.randomUUID()")
