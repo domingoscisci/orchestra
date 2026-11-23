@@ -1323,9 +1323,10 @@ export default Plugin.define({
           if (!notifySessionID) throw new Error("Assignment was recorded but its assigner session is missing")
           await session.prompt({
             sessionID: notifySessionID,
-            text: `Final Orchestra task report ${input.assignmentId} from ${assigneeName} ` +
-              `(${input.outcome}):\n${input.summary}\n\nThis is the authoritative ` +
-              `assignment report; do not request a duplicate report through send_message.`,
+            text: `${agentLabel(assigneeName)} · **Task ${input.outcome}**\n\n` +
+              `${input.summary}\n\nThis is the authoritative assignment report; ` +
+              `do not request a duplicate report through send_message.\n\n` +
+              `Task ID: \`${input.assignmentId}\``,
           })
           return result(`Assignment ${input.assignmentId} report recorded.`)
         },

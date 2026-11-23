@@ -29439,10 +29439,13 @@ ${input.task}
               throw new Error("Assignment was recorded but its assigner session is missing");
             await session.prompt({
               sessionID: notifySessionID,
-              text: `Final Orchestra task report ${input.assignmentId} from ${assigneeName} ` + `(${input.outcome}):
-${input.summary}
+              text: `${agentLabel(assigneeName)} \xB7 **Task ${input.outcome}**
 
-This is the authoritative ` + `assignment report; do not request a duplicate report through send_message.`
+` + `${input.summary}
+
+This is the authoritative assignment report; ` + `do not request a duplicate report through send_message.
+
+` + `Task ID: \`${input.assignmentId}\``
             });
             return result3(`Assignment ${input.assignmentId} report recorded.`);
           }

@@ -406,8 +406,12 @@ describe("Orchestra team setup smoke tests", () => {
     }, { sessionID: "child-1" })
     expect((storage.get(teamKey()) as any).teamMembers[1].assignment)
       .toMatchObject({ status: "completed", summary: "Implemented the change; 3 tests pass." })
-    expect(prompts.get("main")).toContain("Final Orchestra task report")
-    expect(prompts.get("main")).toContain("Implemented the change; 3 tests pass.")
+    expect(prompts.get("main")).toContain(
+      "🤖 **Dev** · **Task completed**\n\nImplemented the change; 3 tests pass.",
+    )
+    expect(prompts.get("main")).toEndWith(
+      `Task ID: \`${created.assignmentId}\``,
+    )
   })
 
   test("records and notifies an initial assignment block", async () => {
