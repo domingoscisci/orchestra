@@ -29115,7 +29115,7 @@ var src_default = exports_plugin.define({
               }
               const previous = await serializeTeam(teamQueues, ACTIVATION_RECEIPTS_KEY, async () => {
                 const found = (await readReceipts(storage)).find((receipt) => receipt.requestId === requestId);
-                if (!found)
+                if (!found || found.state === "failed")
                   await writeReceipt(storage, {
                     requestId,
                     state: "pending",
@@ -29123,8 +29123,9 @@ var src_default = exports_plugin.define({
                   });
                 return found;
               });
-              if (previous)
+              if (previous && previous.state !== "failed") {
                 return result3(JSON.stringify(previous));
+              }
             }
             try {
               if (!input.approved)
@@ -29235,7 +29236,7 @@ var src_default = exports_plugin.define({
                   requestId,
                   state: "failed",
                   updatedAt: Date.now(),
-                  error: "Team activation failed"
+                  error: error instanceof Error ? error.message : String(error)
                 })).catch(() => {
                   return;
                 });

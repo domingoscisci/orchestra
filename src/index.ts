@@ -898,12 +898,14 @@ export default Plugin.define({
             const previous = await serializeTeam(teamQueues, ACTIVATION_RECEIPTS_KEY, async () => {
               const found = (await readReceipts(storage))
                 .find((receipt) => receipt.requestId === requestId)
-              if (!found) await writeReceipt(storage, {
+              if (!found || found.state === "failed") await writeReceipt(storage, {
                 requestId, state: "pending", updatedAt: Date.now(),
               })
               return found
             })
-            if (previous) return result(JSON.stringify(previous))
+            if (previous && previous.state !== "failed") {
+              return result(JSON.stringify(previous))
+            }
           }
 
           try {
@@ -1078,7 +1080,7 @@ export default Plugin.define({
               await serializeTeam(teamQueues, ACTIVATION_RECEIPTS_KEY, () =>
                 writeReceipt(storage, {
                   requestId, state: "failed", updatedAt: Date.now(),
-                  error: "Team activation failed",
+                  error: error instanceof Error ? error.message : String(error),
                 })).catch(() => undefined)
             }
             throw error

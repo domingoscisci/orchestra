@@ -234,14 +234,19 @@ describe("Orchestra team setup smoke tests", () => {
     expect(await response.json()).toEqual({ active: false })
   })
 
-  test("activation failure is recorded without exposing its error details", async () => {
+  test("activation failure preserves its error and can be retried with the same ID", async () => {
     failSwitch = true
     const requestId = "f6c59afd-8e32-4f63-b2dc-595e2c5d6e3f"
     await expect(activate({ requestId })).rejects.toThrow("switch failed")
     const receipts = storage.get("orchestra:activation-receipts:v1") as any[]
-    expect(receipts[0]).toMatchObject({
-      requestId, state: "failed", error: "Team activation failed",
-    })
+    expect(receipts[0]).toMatchObject({ requestId, state: "failed" })
+    expect(receipts[0].error).toContain("switch failed")
+
+    failSwitch = false
+    await activate({ requestId })
+    expect(storage.get("orchestra:activation-receipts:v1")).toMatchObject([
+      { requestId, state: "activated" },
+    ])
   })
 
   test("preview matches the hierarchy and acronyms created on activation", async () => {
