@@ -13,8 +13,8 @@ test("extension manages YAML teams and prompts the plugin to activate them", asy
   expect(contributes.opencodePlugin).toBe("plugin")
   expect(contributes.panel).toMatchObject({
     entry: "panel/index.html",
-    mobile: true,
   })
+  expect(contributes.panel.mobile).toBeUndefined()
   expect(contributes.service).toEqual({
     entry: "service/main.js",
     runtime: "host",
@@ -32,7 +32,7 @@ test("extension manages YAML teams and prompts the plugin to activate them", asy
   expect(panel).toContain('document.addEventListener("visibilitychange"')
   expect(panel).toContain("context.session?.id")
   expect(panel).toContain("generation !== contextGeneration")
-  expect(panel).toContain("crypto.randomUUID()")
+  expect(panel).toContain("createActivationRequestId()")
   expect(service).toContain('request.url?.match(/^\\/v1\\/activations\\/')
   expect(service).toContain('request.url?.match(/^\\/v1\\/sessions\\/')
   expect(service).toContain('endpoint.hostname !== "127.0.0.1"')

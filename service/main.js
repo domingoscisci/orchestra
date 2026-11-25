@@ -1,4 +1,5 @@
 // service/main.ts
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
@@ -9,6 +10,9 @@ if (!Number.isInteger(port) || !serviceToken) {
   throw new Error("Missing OpenChamber service credentials");
 }
 function orchestraDataDirectory() {
+  if (process.env.ORCHESTRA_DATA_DIRECTORY) {
+    return process.env.ORCHESTRA_DATA_DIRECTORY;
+  }
   if (platform() === "darwin")
     return join(homedir(), "Library", "Application Support", "Orchestra");
   if (platform() === "win32") {
@@ -17,8 +21,13 @@ function orchestraDataDirectory() {
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "orchestra");
 }
 var discoveryPath = join(orchestraDataDirectory(), "activation-service.json");
+function constantTimeEqual(actual, expected) {
+  const left = createHash("sha256").update(actual ?? "").digest();
+  const right = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(left, right);
+}
 var server = createServer(async (request, response) => {
-  if (request.headers.authorization !== `Bearer ${serviceToken}`) {
+  if (!constantTimeEqual(request.headers.authorization, `Bearer ${serviceToken}`)) {
     response.writeHead(401).end();
     return;
   }
@@ -26,9 +35,11 @@ var server = createServer(async (request, response) => {
     response.writeHead(200, { "content-type": "application/json" }).end('{"ready":true}');
     return;
   }
-  const match = request.method === "GET" && request.url?.match(/^\/v1\/activations\/([0-9a-f-]{36})$/i);
+  const url = request.url ?? "";
+  const activationMatch = request.method === "GET" && request.url?.match(/^\/v1\/activations\/([0-9a-f-]{36})$/i);
   const sessionMatch = request.method === "GET" && request.url?.match(/^\/v1\/sessions\/([^/]+)\/team$/);
-  const path = match ? `/v1/activations/${match[1]}` : sessionMatch ? request.url : undefined;
+  const auditMatch = request.method === "GET" && request.url?.match(/^\/v1\/sessions\/([^/]+)\/audit$/);
+  const path = activationMatch ? `/v1/activations/${activationMatch[1]}` : sessionMatch || auditMatch ? url : undefined;
   if (!path) {
     response.writeHead(404).end();
     return;
@@ -41,7 +52,10 @@ var server = createServer(async (request, response) => {
       return;
     }
     const upstream = await fetch(`${endpoint.origin}${path}`, {
-      headers: { authorization: `Bearer ${discovery.token}` },
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${discovery.token}`
+      },
       signal: AbortSignal.timeout(2500)
     });
     response.writeHead(upstream.status, {

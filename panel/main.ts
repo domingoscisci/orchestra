@@ -2,6 +2,11 @@ import { connectHost } from "@openchamber/sdk"
 import { applyHostReady } from "@openchamber/sdk/ui"
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml"
 import { nextAcronym } from "../src/core"
+import {
+  activationDenied, buildActivationPrompt, createActivationRequestId,
+  validateActivationHandoff,
+} from "./activation"
+import { parseAuditEvents, type AuditEvent } from "./audit"
 import { parseAgentFrontmatter } from "./agent-frontmatter"
 
 type Agent = {
@@ -50,13 +55,18 @@ type ActivationStatus = {
   requestId: string
   teamId: string
   teamName: string
-  state: "pending" | "activated" | "failed" | "unknown"
+  lead: string
+  roster: Member[]
+  domains: Domain[]
+  state: "pending" | "activated" | "failed" | "denied" | "unknown"
   error?: string
 }
 
 const host = connectHost()
 const root = document.querySelector<HTMLElement>("#app")!
 let activation: ActivationStatus | null = null
+let auditEvents: AuditEvent[] = []
+let auditError: string | null = null
 let pollGeneration = 0
 let projectDirectory: string | null = null
 let readyDirectory: string | null = null
@@ -118,8 +128,21 @@ function drawActivationStatus() {
       ? `Team “${activation.teamName}” activated.`
       : activation.state === "failed"
         ? "Activation failed. Check the configuration and try again."
-        : `Status unavailable for “${activation.teamName}”. ${activation.error ?? "The service may be unauthorized or unreachable."}`
-  target.innerHTML = `<p role="status">${esc(text)}</p>${
+        : activation.state === "denied"
+          ? `Activation denied for “${activation.teamName}”. The permission request was declined, so no team was created.`
+          : `Status unavailable for “${activation.teamName}”. ${activation.error ?? "The service may be unauthorized or unreachable."}`
+  target.innerHTML = `<p role="status">${esc(text)}</p>
+    <details><summary>Activation details</summary>
+      <p>Lead: ${esc(activation.lead)}</p>
+      <ul>${activation.roster.map((member) =>
+        `<li>${esc(member.name)} — ${esc(member.agent)}</li>`,
+      ).join("")}</ul>
+      <ul>${activation.domains.map((domain) =>
+        `<li>${esc(domain.name)} — lead: ${esc(domain.lead)}; members: ${
+          esc(domain.members.join(", "))
+        }</li>`,
+      ).join("")}</ul>
+    </details>${
     activation.state === "unknown"
       ? '<button type="button" data-recheck>Check again</button>' : ""
   }`
@@ -194,7 +217,7 @@ async function pollActivation(recheck = false) {
   activation.state = "pending"
   drawActivationStatus()
   while (generation === pollGeneration && activation?.state === "pending") {
-    if (Date.now() - started > 120_000) {
+    if (Date.now() - started > 600_000) {
       activation.state = "unknown"
       drawActivationStatus()
       return
@@ -232,7 +255,58 @@ async function pollActivation(recheck = false) {
     }
     if (!recheck) await new Promise((resolve) => setTimeout(resolve, 1500))
     else recheck = false
+    await loadAudit()
+    if (generation !== pollGeneration) return
+    // A denied permission leaves no receipt; stop instead of polling for 10 min.
+    if (activation && activationDenied(auditEvents, activation.requestId)) {
+      activation.state = "denied"
+      drawActivationStatus()
+      return
+    }
   }
+}
+
+async function loadAudit() {
+  if (!readySessionId) return
+  try {
+    const response = await host.serviceRequest({
+      method: "GET",
+      path: `/v1/sessions/${encodeURIComponent(readySessionId)}/audit`,
+    })
+    if (response.status !== 200) throw new Error("Audit history is unavailable")
+    auditEvents = parseAuditEvents(response.body)
+    auditError = null
+  } catch (error) {
+    auditError = error instanceof Error
+      ? error.message
+      : "Audit history is unavailable."
+  }
+  drawAudit()
+}
+
+function drawAudit() {
+  const target = root.querySelector<HTMLElement>("[data-audit]")
+  if (!target) return
+  const labels = {
+    activate_team: "Activate team",
+    complete_team: "Close team",
+    delete_agent: "Delete child agent",
+  }
+  const error = auditError
+    ? `<p role="alert">${esc(auditError)} Showing the last retrieved entries.</p>`
+    : ""
+  const events = auditEvents.length
+    ? auditEvents.map((event) => `
+      <article class="card">
+        <div class="team-top">
+          <strong>${labels[event.operation]}</strong>
+          <span class="badge">Permission ${event.decision === "allowed" ? "allowed" : "denied"}</span>
+        </div>
+        <p class="muted">${esc(new Date(event.at).toLocaleString())}</p>
+        <ul>${event.resources.map((resource) => `<li>${esc(resource)}</li>`).join("")}</ul>
+      </article>`).join("")
+    : '<p class="muted">No sensitive operations recorded for this session.</p>'
+  target.innerHTML = `<h2>Recent sensitive operations</h2>${error}${events}`
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -240,6 +314,11 @@ document.addEventListener("visibilitychange", () => {
   else if (activation?.state === "pending") void pollActivation()
 })
 window.addEventListener("pagehide", () => { pollGeneration++ })
+setInterval(() => {
+  if (!document.hidden && root.querySelector("[data-audit]")) {
+    void loadAudit()
+  }
+}, 3000)
 
 async function answer(value: unknown, button: HTMLButtonElement) {
   button.disabled = true
@@ -402,9 +481,11 @@ function renderManager(message = "") {
     <h2>Saved teams <span class="muted">(${teamStore.teams.length})</span></h2>
     ${cards || '<p class="muted">No saved teams. Create one to get started.</p>'}
     <p class="muted" role="status" data-status>${esc(message)}</p>
+    <section data-audit aria-live="polite"></section>
     <section data-activation aria-live="polite"></section>
-    <p class="footnote">The selected team is sent to the chat agent; the plugin validates the configuration and starts the sessions.</p>`
+    <p class="footnote">Sensitive operations use the native OpenCode permission prompt. This panel shows operation details and a local audit history; it does not approve actions.</p>`
   drawActivationStatus()
+  drawAudit()
   root.querySelector("[data-new]")?.addEventListener("click", () => renderEditor())
   root.querySelector("[data-refresh]")?.addEventListener("click", async () => {
     const generation = contextGeneration
@@ -414,6 +495,7 @@ function renderManager(message = "") {
         ? await readActiveTeam(readySessionId, generation)
         : ""
       if (generation !== contextGeneration) return
+      await loadAudit()
       renderManager(message || "Configurations and roles refreshed.")
     }
     catch (error) {
@@ -448,13 +530,21 @@ function renderManager(message = "") {
       selectedTeamId = team.id
       item.disabled = true
       try {
-        const requestId = crypto.randomUUID()
-        const request = `Activate this Orchestra team in the current project using orchestra.activate_team. Use exactly requestId "${requestId}". User-approved configuration: ${JSON.stringify({
+        const requestId = createActivationRequestId()
+        const request = buildActivationPrompt(validateActivationHandoff({
+          requestId, savedTeamId: team.id,
           lead: team.lead.agent, roster: team.roster, domains: team.domains,
-          approved: true, requestId, savedTeamId: team.id,
-        })}. Do not modify the configuration. If TEAM.md exists and an update choice is needed, ask the user first.`
+        }))
         await host.prompt({ text: request, send: true })
-        activation = { requestId, teamId: team.id, teamName: team.name, state: "pending" }
+        activation = {
+          requestId,
+          teamId: team.id,
+          teamName: team.name,
+          lead: team.lead.agent,
+          roster: team.roster,
+          domains: team.domains,
+          state: "pending",
+        }
         renderManager("Request sent to chat.")
         void pollActivation()
       } catch (error) {
@@ -901,7 +991,6 @@ function renderReview(config: Config, preview: Preview) {
       action: "team-setup",
       config: { ...config, teamGuideMode },
       preview,
-      approved: true,
     }, submit)
   })
 }
@@ -926,6 +1015,7 @@ host.onReady(async (context) => {
     const message = sessionId ? await readActiveTeam(sessionId, generation) : ""
     if (generation !== contextGeneration) return
     renderManager(message)
+    void loadAudit()
   } catch (error) {
     if (generation !== contextGeneration) return
     renderManager(error instanceof Error ? error.message : String(error))
@@ -939,6 +1029,7 @@ document.addEventListener("visibilitychange", async () => {
   const message = await readActiveTeam(readySessionId, generation)
   if (generation === contextGeneration && !document.hidden &&
     root.querySelector("[data-refresh]")) {
+    await loadAudit()
     renderManager(message)
   }
 })

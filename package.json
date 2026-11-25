@@ -1,6 +1,18 @@
 {
   "name": "opencode-orchestra",
-  "version": "0.1.0",
+  "version": "0.0.1",
+  "description": "OpenCode plugin and OpenChamber extension for running multi-agent teams with a fixed roster.",
+  "license": "MIT",
+  "author": "Domingo Scisci",
+  "homepage": "https://github.com/domingoscisci/orchestra#readme",
+  "bugs": {
+    "url": "https://github.com/domingoscisci/orchestra/issues"
+  },
+  "packageManager": "bun@1.2.15",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/domingoscisci/orchestra.git"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -13,20 +25,21 @@
   ],
   "scripts": {
     "test": "bun test",
-    "build:extension": "mkdir -p plugin service && bun build src/index.ts --target=bun --outfile=plugin/index.js && bunx openchamber-guest-bundle panel/main.ts panel/main.js && bunx openchamber-guest-bundle --node service/main.ts service/main.js"
+    "build:extension": "mkdir -p plugin service && bun build src/index.ts --target=bun --outfile=plugin/index.js && openchamber-guest-bundle panel/main.ts panel/main.js && openchamber-guest-bundle --node service/main.ts service/main.js",
+    "check:extension": "openchamber-guest-check .",
+    "audit:report": "bun scripts/audit-report.ts audit.json"
   },
   "openchamber": {
     "apiVersion": 1,
     "engines": {
-      "openchamber": ">=2.7.2"
+      "openchamber": ">=2.8.0"
     },
     "contributes": {
       "panel": {
         "id": "orchestra",
         "name": "Orchestra",
         "icon": "panel/icon.svg",
-        "entry": "panel/index.html",
-        "mobile": true
+        "entry": "panel/index.html"
       },
       "opencodePlugin": "plugin",
       "service": {
@@ -42,6 +55,10 @@
   "devDependencies": {
     "@opencode/plugin": "2.2.6",
     "@openchamber/sdk": "2.7.2"
+  },
+  "overrides": {
+    "glob": "14.0.6",
+    "minimatch": "11.0.9"
   },
   "dependencies": {
     "yaml": "^2.9.1"

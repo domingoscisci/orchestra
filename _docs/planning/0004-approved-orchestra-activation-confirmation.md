@@ -1,6 +1,7 @@
 # 0004-approved-orchestra-activation-confirmation
 
-- Status: In Progress
+- Status: In Progress — path recorded; timeout and unavailable-service UI remain
+  open
 - Owner: TBD
 - Created: 2026-11-19
 - Target: N/A
@@ -8,7 +9,8 @@
 - Related plans: [0003-approved-orchestra-openchamber-extension.md](0003-approved-orchestra-openchamber-extension.md)
 - Related issues: none
 - Related PRs: none
-- Related ADRs: none
+- Related ADRs:
+  - [0002: Require out-of-band panel approval for sensitive operations](../adr/0002-out-of-band-panel-approval.md)
 
 ## Steps
 
@@ -16,7 +18,7 @@
       secure local connection for the extension service.
 - [x] Implement correlated activation status and session-scoped active-team
       lookup without creating a second canonical store.
-- [ ] Build and smoke-test the integrated extension on OpenChamber desktop.
+- [x] Build and smoke-test the integrated extension on OpenChamber desktop.
 
 ## Problem statement
 
@@ -161,8 +163,8 @@ and the host's idle shutdown were not tested.
 The user reports that team activation succeeded in `dassiIngest`. After
 reopening OpenChamber, the panel did not show the active badge; another
 activation attempt reported that the team was already active. The session
-transcript confirms both tool outcomes, but not successful badge restoration:
-[OpenChamber session](openchamber://session/ses_e06d335c2ffecSMTaZE2NWQcT1).
+transcript confirms both tool outcomes, but not successful badge restoration.
+The session identifier is not published.
 
 ## Options considered
 
@@ -235,19 +237,28 @@ read-only API proves too risky or the live status view is deferred.
 
 ## Acceptance criteria
 
-- [ ] The panel reports activation only after the plugin's successful tool
+- [x] The panel reports activation only after the plugin's successful tool
       result, correlated to the request ID from that panel view.
-- [ ] Reopening or changing the panel's session restores the active badge only
+- [x] Reopening or changing the panel's session restores the active badge only
       when the canonical plugin state says a team is active in that session.
-- [ ] Failures, timeouts, unavailable service, and denied permissions are
-      displayed distinctly and without sensitive details.
+- [x] Denied service permission is reported without sensitive details
+      (owner-reported desktop smoke, 2026-11-25).
+- [ ] A denied team activation reaches a terminal panel state from its matching
+      audit event; source regression tests pass, but live desktop verification
+      remains open.
+- [ ] Timeout and unavailable-service states are displayed distinctly and
+      without sensitive details; live desktop verification remains open.
 - [x] The bridge binds to loopback, authenticates with a private token, follows
       plugin/panel lifecycles, and exposes no activation write endpoint.
 - [x] Desktop probe confirms `serviceRequest`, service startup, shared temp-file
       access, and loopback connection to a local plugin stand-in.
-- [ ] Verify the final shared per-user path and real OpenCode plugin on desktop.
-- [x] The extension builds, passes regression tests, and passes the package
-      checker; real desktop smoke testing remains outstanding.
+- [x] Record the shared per-user path as
+      `/home/openchamber/.local/share/orchestra` (owner-reported plugin process
+      environment). The guest-service contract passes the same `HOME`; its
+      resolver selects the same path, though no service PID was captured.
+- [ ] The final integrated extension builds, passes regression tests, and passes
+      the package checker. Earlier results do not validate the current source;
+      see plan 0005.
 
 ## Dependencies
 
@@ -261,12 +272,44 @@ read-only API proves too risky or the live status view is deferred.
   failure, plus session-scoped active-team lookup and badge restoration.
   Timeout and unavailable-service UI states still need desktop testing.
 - Build the extension and smoke-test the approved flow on desktop.
+- Create a child session, retrieve it through the supported session API, and
+  confirm `session.get` returns its `parentID`. Record the host version and
+  observed value; this is a prerequisite for relying on the plugin's
+  root-session activation guard.
 - Record the tested OpenChamber version and verify the declared minimum.
 
 ## Current blockers
 
-- The user reports successful team activation in `dassiIngest`; the panel did
-  not restore its badge after reopen. The new lookup and final per-user path
-  still need desktop verification.
+- Historical note: the read-only bridge constraint above was superseded by
+  ADR 0003. The panel remains read-only for operation decisions; native host
+  permission prompts gate sensitive actions.
+- The earlier badge-restoration failure is superseded by the smoke result below.
+  The matching-audit denied-activation state is implemented in panel source,
+  but not verified live. Timeout/unavailable UI remains unverified.
 - OpenChamber's service contract does not promise immediate process shutdown
   when the panel closes; the accepted fallback is its ten-minute idle stop.
+
+## Desktop smoke test (2026-11-25)
+
+- User-reported result on OpenChamber 2.8.0 and OpenCode 2.3.2: local extension
+  installation and panel opening succeeded; service permission approval and
+  denial were both tested successfully.
+- Owner-reported M3 smoke on the NAS: native `ask` prompts appeared for
+  `activate_team`, `complete_team`, and `delete_agent`; a rejected activation
+  was denied, and explicit configured `deny` blocked activation without a
+  prompt, active team, `TEAM.md`, or `AGENTS.md`. Audit outcomes were coherent.
+  The owner confirms this used a clean/isolated profile. These are
+  owner-reported runtime results; no prompt capture or host trace was saved.
+- Team activation succeeded after rebuilding the panel UUID fallback.
+  Reopening restored the active badge, and a different session did not inherit
+  it.
+- A child session's `parentID` was checked and confirmed to point to its Lead
+  session.
+- Path probe, owner-reported: four OpenCode candidate processes had
+  `HOME=/home/openchamber` and no `XDG_DATA_HOME` or
+  `ORCHESTRA_DATA_DIRECTORY`; the plugin resolver therefore selects
+  `/home/openchamber/.local/share/orchestra`. The guest-service contract passes
+  `HOME`, so the service resolves the same default path; no service process was
+  visible in this probe. Timeout and unavailable-service UI remain unverified.
+- The earlier report that badge restoration was missing is superseded by this
+  smoke result.

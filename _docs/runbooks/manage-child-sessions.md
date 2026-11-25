@@ -290,10 +290,15 @@ should be removed.
 await ctx.session.switchAgent({ sessionID, agent: "plan" })
 ```
 
-Changes the agent used for subsequent requests in the specified session. The
-Orchestra `switch_agent` tool applies this to the calling session; it does not
-change requests that have already started. Runtime testing confirmed switching
-the current session to the `plan` agent.
+Changes the agent used for subsequent requests in the specified session. It does
+not change requests that have already started. Runtime testing confirmed
+switching the current session to the `plan` agent.
+
+The plugin uses this host method internally, not through an agent-callable
+tool: `activate_team` switches the Lead session to the configured Lead agent,
+`complete_team` restores the original agent, and a failed activation restores
+it as part of rollback. Orchestra exposes no standalone agent-switch tool, so a
+team member cannot select a different agent through Orchestra.
 
 ## References
 
