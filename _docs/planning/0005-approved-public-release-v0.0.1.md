@@ -132,10 +132,10 @@ they conflict. Historical evidence is retained with its original dates.
   run. CR1's post-build content review passed; ACSA's independent content
   checks agree. The generated bundles are uncommitted and the byte-parity CI
   job has never run.
-- ACSA reports 19 release-related files are untracked, including source, tests,
-  workflow, public docs, and plans. A commit cut before staging the complete
-  reviewed source set would break source/bundle provenance. ACSA verified none
-  of those untracked files is ignored by `.gitignore`.
+- Before the candidate commit, 19 release-related files were untracked,
+  including source, tests, workflow, public docs, and plans. They are now
+  included in the PR candidate; ACSA verified none were ignored by
+  `.gitignore`.
 - Owner-directed SMOKE-001 handling: the three historical files were recovered
   from commit `b808350` into a protected external archive; each archived blob
   hash matches its Git source blob. A complete-history Git bundle was created
@@ -144,10 +144,11 @@ they conflict. Historical evidence is retained with its original dates.
   to remove the three paths. A scan found none of those paths in either
   rewritten history, and the rewritten feature still descends from rewritten
   `main`. A candidate bundle contains only those two refs.
-- The rewritten refs and candidate working copy are local preparation only.
-  The original checkout and GitHub refs are unchanged; no force-push or PR has
-  occurred. The owner supplied the GitHub noreply address; all author and
-  committer emails in both target histories were rewritten to it and checked.
+- The owner supplied the GitHub noreply address; all author and committer emails
+  in both target histories were rewritten to it and checked. After explicit
+  owner approval, the rewritten `main` and feature refs were atomically
+  force-pushed to the private repository. PR #1 is open and preserves the
+  existing commits. No merge, tag, release, or visibility change has occurred.
 - In the rewritten candidate checkout, `bun install --frozen-lockfile`,
   `bun run build:extension`, and `bun run check:extension` succeeded. One full
   test run passed (138 tests). All three rebuilt bundles compared byte-for-byte
@@ -167,8 +168,9 @@ they conflict. Historical evidence is retained with its original dates.
   the same `HOME`, so its resolver selects that path too, although no service
   process was visible in the probe. Timeout/unavailable-service UI remains
   unverified.
-- The repository remains private. No backup, PR, merge, history rewrite, tag,
-  release, branch protection, or visibility change has been performed.
+- The repository remains private. The pre-rewrite history bundle is verified;
+  PR #1 is open. No merge, tag, release, branch protection, or visibility
+  change has been performed.
 
 ## Objective
 

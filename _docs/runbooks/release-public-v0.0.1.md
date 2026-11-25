@@ -100,8 +100,9 @@ is an ancestor of both `main` and `feature/openchamber-extension`. The three
 SMOKE-001/test-prompt paths have been removed from an isolated local rewrite
 of those refs and verified absent from their reachable objects. The
 owner-provided noreply address was also applied to all author and committer
-identities on both target refs and verified. This does not update GitHub. Do
-not push rewritten refs until the owner explicitly approves the force-push.
+identities on both target refs and verified. After explicit owner approval,
+both rewritten refs were atomically force-pushed to the still-private GitHub
+repository. PR #1 is open; no merge or visibility change has occurred.
 
 ## Gate 4: release candidate on main
 
