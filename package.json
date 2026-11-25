@@ -25,7 +25,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "build:extension": "mkdir -p plugin service && bun build src/index.ts --target=bun --outfile=plugin/index.js && openchamber-guest-bundle panel/main.ts panel/main.js && openchamber-guest-bundle --node service/main.ts service/main.js",
+    "build:extension": "mkdir -p plugin service && bun build src/index.ts --target=bun --outfile=plugin/index.js && openchamber-guest-bundle panel/main.ts panel/main.js && bun scripts/canonicalize-panel.ts panel/main.js && openchamber-guest-bundle --node service/main.ts service/main.js",
     "check:extension": "openchamber-guest-check .",
     "audit:report": "bun scripts/audit-report.ts audit.json"
   },
