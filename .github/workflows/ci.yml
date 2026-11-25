@@ -86,6 +86,29 @@ jobs:
           changed="$(git status --porcelain -- plugin panel/main.js service/main.js)"
           if [ -n "$changed" ]; then
             printf '%s\n' "$changed"
+            python3 - <<'PY'
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          for name in ("plugin/index.js", "panel/main.js", "service/main.js"):
+              committed = subprocess.check_output(["git", "show", f"HEAD:{name}"])
+              generated = Path(name).read_bytes()
+              if committed == generated:
+                  continue
+              offset = next(
+                  (i for i, pair in enumerate(zip(committed, generated))
+                   if pair[0] != pair[1]),
+                  min(len(committed), len(generated)),
+              )
+              print(
+                  f"{name}: committed sha256={hashlib.sha256(committed).hexdigest()} "
+                  f"generated sha256={hashlib.sha256(generated).hexdigest()} "
+                  f"sizes={len(committed)}/{len(generated)} first_diff={offset}"
+              )
+              print("committed:", repr(committed[max(0, offset - 48):offset + 96]))
+              print("generated:", repr(generated[max(0, offset - 48):offset + 96]))
+          PY
             echo "::error::Generated bundles differ from the committed output, or new output is untracked"
             exit 1
           fi
