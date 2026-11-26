@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    # Release tags are checked too: the tag must pass the same gates.
+    tags: ["v*"]
+
+# Least privilege: pull_request from forks runs untrusted code with a
+# read-only token and no secrets. Never use pull_request_target here.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify local artifacts stay untracked and ignored
+        run: |
+          set -u
+          status=0
+          for path in .team.yml TEAM.md AGENTS.md .env .env.local; do
+            if ! git check-ignore -q "$path"; then
+              echo "::error file=.gitignore::$path must be ignored"
+              status=1
+            fi
+            if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+              echo "::error::$path is tracked; remove it from the index"
+              status=1
+            fi
+          done
+          # Inverse assertion: the committed template must stay visible so a
+          # secret ignore rule cannot hide the documented example file.
+          for path in .env.example; do
+            if git check-ignore -q "$path"; then
+              echo "::error file=.gitignore::$path must not be ignored"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.2.15
+
+      - name: Verify Bun matches packageManager
+        run: |
+          set -euo pipefail
+          declared="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
+          actual="$(bun --version)"
+          if [ -z "$declared" ]; then
+            echo "::error file=package.json::packageManager is missing or unreadable"
+            exit 1
+          fi
+          if [ "$declared" != "$actual" ]; then
+            echo "::error::Bun ${actual} does not match packageManager ${declared}"
+            exit 1
+          fi
+          echo "Bun ${actual} matches packageManager"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build extension
+        run: bun run build:extension
+
+      - name: Fail when generated output changes or is untracked
+        run: |
+          set -euo pipefail
+          changed="$(git status --porcelain -- plugin panel/main.js service/main.js)"
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            python3 - <<'PY'
+          import hashlib
+          import subprocess
+          from pathlib import Path
+
+          for name in ("plugin/index.js", "panel/main.js", "service/main.js"):
+              committed = subprocess.check_output(["git", "show", f"HEAD:{name}"])
+              generated = Path(name).read_bytes()
+              if committed == generated:
+                  continue
+              offset = next(
+                  (i for i, pair in enumerate(zip(committed, generated))
+                   if pair[0] != pair[1]),
+                  min(len(committed), len(generated)),
+              )
+              print(
+                  f"{name}: committed sha256={hashlib.sha256(committed).hexdigest()} "
+                  f"generated sha256={hashlib.sha256(generated).hexdigest()} "
+                  f"sizes={len(committed)}/{len(generated)} first_diff={offset}"
+              )
+              print("committed:", repr(committed[max(0, offset - 48):offset + 96]))
+              print("generated:", repr(generated[max(0, offset - 48):offset + 96]))
+          PY
+            echo "::error::Generated bundles differ from the committed output, or new output is untracked"
+            exit 1
+          fi
+
+      - name: Check extension package
+        run: bun run check:extension
+
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the secret scan covers every published commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # GitHub secret scanning and code scanning need Advanced Security on a
+      # private repository. This pattern-based scan is the substitute, not an
+      # equivalent: it has no push protection and no alert database.
+      - name: Secret scan (gitleaks)
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          expected=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -fsSL -o "$asset" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${asset}"
+          echo "${expected}  ${asset}" | sha256sum --check --strict
+          tar -xzf "$asset" gitleaks
+          ./gitleaks git --redact --no-banner --exit-code 1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.2.15
+
+      - name: Verify Bun matches packageManager
+        run: |
+          set -euo pipefail
+          declared="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
+          actual="$(bun --version)"
+          if [ -z "$declared" ]; then
+            echo "::error file=package.json::packageManager is missing or unreadable"
+            exit 1
+          fi
+          if [ "$declared" != "$actual" ]; then
+            echo "::error::Bun ${actual} does not match packageManager ${declared}"
+            exit 1
+          fi
+          echo "Bun ${actual} matches packageManager"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Dependency review is a GitHub Advanced Security feature and is not
+      # available here. bun audit covers advisories for installed packages;
+      # parsing and classification live in scripts/audit-report.ts and are
+      # covered by tests/audit-report.test.ts.
+      - name: Dependency audit (medium and above fail)
+        run: |
+          set -u
+          trap 'rm -f audit.json' EXIT
+          bun audit --json > audit.json || true
+          bun run audit:report

@@ -1,6 +1,6 @@
 # 0002-approved-team-management
 
-- Status: In Progress
+- Status: Done
 - Owner: TBD
 - Created: 2026-11-13
 - Related issues: none
@@ -22,8 +22,9 @@
 - [x] Extend `inspect_agent` with assignment status and verify the full
       pending-ACK, started, completed, and blocked flows without duplicate
       user-facing progress messages.
-- [ ] Run a live OpenCode smoke test to verify background dispatch, ACK
-      visibility, and a single final/block notification.
+- [x] Run a live OpenCode smoke test to verify background dispatch, ACK
+      visibility, and a single final/block notification. The user reports that
+      the smoke test was performed; its result was not communicated here.
 
 ## Problem statement
 
@@ -207,9 +208,8 @@ in TEAM.md. AGENTS.md points agents to TEAM.md.
 - `_docs/team-data-model.md` accurately distinguishes the team document shape
   from any still-proposed persistence layout for out-of-scope board entities.
 - Validation: `bun test` passed (52 tests); `git diff --check` is clean.
-- Remaining verification: run the new assignment lifecycle against live
-  OpenCode before treating its messaging and notification behavior as runtime
-  confirmed.
+- Live OpenCode smoke test: performed according to the user. The outcome was
+  not provided in this session and has not been independently verified.
 
 ## Promotion criteria
 
@@ -238,3 +238,6 @@ in TEAM.md. AGENTS.md points agents to TEAM.md.
 - Original team-model validation: `bun test` passed (42 tests).
 - Limitation: writes are serialized within one plugin instance only; storage
   does not guarantee cross-process locking or crash-safe atomicity.
+- Live assignment lifecycle smoke test: the user reports it was performed.
+  No detailed result was recorded here; it is treated as user-reported rather
+  than independently verified.

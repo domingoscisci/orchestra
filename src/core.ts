@@ -41,6 +41,7 @@ export type TeamDocument = {
     leadMemberId: string
     createdAt: string
     originalAgent: string
+    savedTeamId?: string
   }
   teamMembers: Array<{
     id: string
@@ -114,6 +115,23 @@ function invalidTeam(reason: string): never {
   throw new Error(`Invalid persisted Orchestra team: ${reason}`)
 }
 
+// Labels are rendered into TEAM.md and bootstrap prompts, so they must stay
+// on their own line; line breaks and control characters are structure, not data.
+const unsafeTeamLabel = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
+
+export function hasUnsafeTeamLabel(value: string) {
+  return unsafeTeamLabel.test(value)
+}
+
+export function teamLabel(value: string, field: string) {
+  if (hasUnsafeTeamLabel(value)) {
+    throw new Error(
+      `Invalid ${field}: line breaks and control characters are not allowed`,
+    )
+  }
+  return value.trim()
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -132,7 +150,13 @@ export function validateTeamDocument(value: unknown): asserts value is TeamDocum
   const run = value.teamRun
   const runID = requiredString(run.id, "teamRun.id")
   requiredString(run.leadMemberId, "teamRun.leadMemberId")
-  requiredString(run.originalAgent, "teamRun.originalAgent")
+  const originalAgent = requiredString(run.originalAgent, "teamRun.originalAgent")
+  if (hasUnsafeTeamLabel(originalAgent)) {
+    invalidTeam("teamRun.originalAgent has line breaks or control characters")
+  }
+  if (run.savedTeamId !== undefined) {
+    requiredString(run.savedTeamId, "teamRun.savedTeamId")
+  }
   if (!Number.isFinite(Date.parse(requiredString(run.createdAt, "teamRun.createdAt")))) {
     invalidTeam("teamRun.createdAt is not a date")
   }
@@ -155,13 +179,24 @@ export function validateTeamDocument(value: unknown): asserts value is TeamDocum
     if (requiredString(member.runId, `${id}.runId`) !== runID) {
       invalidTeam(`${id} belongs to a different run`)
     }
-    const name = requiredString(member.name, `${id}.name`).trim().toLowerCase()
-    if (names.has(name)) invalidTeam(`duplicate member name ${member.name}`)
-    names.add(name)
-    requiredString(member.role, `${id}.role`)
-    const acronym = requiredString(member.acronym, `${id}.acronym`).toLowerCase()
-    if (acronyms.has(acronym)) invalidTeam(`duplicate acronym ${member.acronym}`)
-    acronyms.add(acronym)
+    const name = requiredString(member.name, `${id}.name`)
+    if (hasUnsafeTeamLabel(name)) {
+      invalidTeam(`${id}.name has line breaks or control characters`)
+    }
+    const normalizedName = name.trim().toLowerCase()
+    if (names.has(normalizedName)) invalidTeam(`duplicate member name ${member.name}`)
+    names.add(normalizedName)
+    const role = requiredString(member.role, `${id}.role`)
+    if (hasUnsafeTeamLabel(role)) {
+      invalidTeam(`${id}.role has line breaks or control characters`)
+    }
+    const acronym = requiredString(member.acronym, `${id}.acronym`)
+    if (hasUnsafeTeamLabel(acronym)) {
+      invalidTeam(`${id}.acronym has line breaks or control characters`)
+    }
+    const normalizedAcronym = acronym.toLowerCase()
+    if (acronyms.has(normalizedAcronym)) invalidTeam(`duplicate acronym ${member.acronym}`)
+    acronyms.add(normalizedAcronym)
 
     const session = member.session
     const sessionID = requiredString(session.id, `${id}.session.id`)
@@ -246,6 +281,9 @@ export function validateTeamDocument(value: unknown): asserts value is TeamDocum
       invalidTeam(`${id} belongs to a different run`)
     }
     requiredString(domain.name, `${id}.name`)
+    if (hasUnsafeTeamLabel(domain.name)) {
+      invalidTeam(`${id}.name has line breaks or control characters`)
+    }
     const leadMemberId = requiredString(domain.leadMemberId, `${id}.leadMemberId`)
     if (leadMemberId === run.leadMemberId || !memberIDs.has(leadMemberId) ||
       !domain.memberIds.includes(leadMemberId)) {
@@ -381,7 +419,7 @@ export function validateTeamRoster(
   const names = new Set<string>(["team lead"])
   const participantNames = new Set<string>()
   for (const member of roster) {
-    const name = member.name.trim()
+    const name = teamLabel(member.name, "participant name")
     if (!name || names.has(name.toLowerCase())) {
       throw new Error(`Missing or duplicate participant name: "${member.name}"`)
     }
@@ -398,9 +436,10 @@ export function validateTeamRoster(
   }
   const domainMembers = new Set<string>()
   for (const domain of domains) {
+    const domainName = teamLabel(domain.name, "domain name")
     const lead = domain.lead.trim().toLowerCase()
     const members = domain.members.map((name) => name.trim().toLowerCase())
-    if (!domain.name.trim() || !participantNames.has(lead) || !members.includes(lead) ||
+    if (!domainName || !participantNames.has(lead) || !members.includes(lead) ||
       members.some((name) => !participantNames.has(name)) ||
       new Set(members).size !== members.length ||
       members.some((name) => domainMembers.has(name))) {
@@ -408,6 +447,49 @@ export function validateTeamRoster(
     }
     for (const name of members) domainMembers.add(name)
   }
+}
+
+export function canonicalApprovalPayload(input:
+  | {
+    operation: "activate_team"
+    lead: string
+    roster: TeamRosterEntry[]
+    domains: TeamDomain[]
+    savedTeamId?: string
+    teamGuideMode?: "overwrite" | "append"
+  }
+  | { operation: "complete_team"; teamRunId: string }
+  | { operation: "delete_agent"; childSessionId: string },
+) {
+  if (input.operation === "complete_team") {
+    return JSON.stringify({
+      operation: input.operation,
+      teamRunId: input.teamRunId,
+    })
+  }
+  if (input.operation === "delete_agent") {
+    return JSON.stringify({
+      operation: input.operation,
+      childSessionId: input.childSessionId,
+    })
+  }
+  // Fixed key order and trimmed values: the digest must cover exactly what the
+  // plugin will apply, independent of how the model serialized the tool input.
+  return JSON.stringify({
+    operation: input.operation,
+    lead: input.lead.trim(),
+    roster: input.roster.map((member) => ({
+      name: member.name.trim(),
+      agent: member.agent.trim(),
+    })),
+    domains: input.domains.map((domain) => ({
+      name: domain.name.trim(),
+      lead: domain.lead.trim(),
+      members: domain.members.map((member) => member.trim()),
+    })),
+    savedTeamId: input.savedTeamId ?? null,
+    teamGuideMode: input.teamGuideMode ?? null,
+  })
 }
 
 export function pageSessions<T>(page: { sessions?: T[]; data?: T[] }): T[] {

@@ -8,3 +8,25 @@ coverage/
 .stfolder/
 .stversions/
 .stignore
+/spike/
+
+# Local team state written by Orchestra activation
+/.team.yml
+/TEAM.md
+/AGENTS.md
+
+# Local secrets
+.env
+.env.*
+!.env.example
+.npmrc
+.netrc
+
+# Private keys, certificates, and logs
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.log
