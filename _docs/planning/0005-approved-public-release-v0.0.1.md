@@ -37,6 +37,28 @@
 - [ ] Make the repository public and verify the published v0.0.1 Git/ZIP
       installation only after the owner's explicit approval.
 
+## Current status update (2026-11-26)
+
+This update supersedes earlier status claims below wherever they conflict.
+
+- PR #1 was merged into `main` at `4afa9ba4d7339a69a935e54328ab2c2f430d07ba`.
+  The `verify` and `security` checks passed on both `main` and tag `v0.0.1`.
+- `main` requires the `verify` and `security` status checks; force-push and
+  branch deletion are disabled.
+- Annotated tag `v0.0.1` points to the merged `main` commit. The repository
+  remains private; no GitHub Release or visibility change has been made.
+- The owner reports a NAS smoke on 2026-11-26: after approximately ten minutes,
+  the panel displayed `Status unavailable` and `Check again`; after denying
+  the pending native activation permission, rechecking reported activation
+  denied. The supplied screenshot shows no token, local path, or stack trace.
+  Host versions were not reconfirmed for this run. See plan 0004.
+- The owner reports a NAS smoke of the test-only HTTP 503 probe. The panel showed
+  the unavailable status and audit-history fallback without exposing a token,
+  local path, or stack trace. This verifies HTTP 503 handling only; a denied
+  service grant and a service process that fails to start remain untested.
+  The pinned SDK 2.7.2 approves the requested capability list as a whole, so
+  denying only `service` while retaining `files` and `prompt` is unsupported.
+
 ## Current status update (2026-11-25)
 
 This section supersedes older baseline and blocker statements below wherever
