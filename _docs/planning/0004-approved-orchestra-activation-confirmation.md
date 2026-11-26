@@ -1,7 +1,7 @@
 # 0004-approved-orchestra-activation-confirmation
 
-- Status: In Progress — path recorded; timeout and unavailable-service UI remain
-  open
+- Status: In Progress — timeout and HTTP 503 unavailable-service UI verified
+  by owner-reported NAS smoke
 - Owner: TBD
 - Created: 2026-11-19
 - Target: N/A
@@ -243,11 +243,14 @@ read-only API proves too risky or the live status view is deferred.
       when the canonical plugin state says a team is active in that session.
 - [x] Denied service permission is reported without sensitive details
       (owner-reported desktop smoke, 2026-11-25).
-- [ ] A denied team activation reaches a terminal panel state from its matching
-      audit event; source regression tests pass, but live desktop verification
-      remains open.
-- [ ] Timeout and unavailable-service states are displayed distinctly and
-      without sensitive details; live desktop verification remains open.
+- [x] A denied team activation reaches a terminal panel state from its matching
+      audit event (owner-reported NAS smoke, 2026-11-26).
+- [x] A pending activation times out to an unavailable/unknown state with
+      `Check again`; after the native permission denial, rechecking reports
+      activation denied (owner-reported NAS smoke, 2026-11-26).
+- [x] The unavailable-service state is displayed distinctly and without
+      sensitive details (owner-reported NAS smoke with the test-only HTTP 503
+      probe, 2026-11-26).
 - [x] The bridge binds to loopback, authenticates with a private token, follows
       plugin/panel lifecycles, and exposes no activation write endpoint.
 - [x] Desktop probe confirms `serviceRequest`, service startup, shared temp-file
@@ -256,9 +259,8 @@ read-only API proves too risky or the live status view is deferred.
       `/home/openchamber/.local/share/orchestra` (owner-reported plugin process
       environment). The guest-service contract passes the same `HOME`; its
       resolver selects the same path, though no service PID was captured.
-- [ ] The final integrated extension builds, passes regression tests, and passes
-      the package checker. Earlier results do not validate the current source;
-      see plan 0005.
+- [x] The tagged integrated extension builds, passes regression tests, and
+      passes the package checker; GitHub CI passed on `v0.0.1` (see plan 0005).
 
 ## Dependencies
 
@@ -269,8 +271,10 @@ read-only API proves too risky or the live status view is deferred.
 ## Validation plan
 
 - Focused tests cover receipt correlation, duplicate IDs, success, and handled
-  failure, plus session-scoped active-team lookup and badge restoration.
-  Timeout and unavailable-service UI states still need desktop testing.
+  failure, plus session-scoped active-team lookup and badge restoration. The
+  timeout and test-only HTTP 503 unavailable-service UI now have owner-reported
+  NAS smoke evidence. Grant-denied and service-start-failure states remain
+  unverified.
 - Build the extension and smoke-test the approved flow on desktop.
 - Create a child session, retrieve it through the supported session API, and
   confirm `session.get` returns its `parentID`. Record the host version and
@@ -284,8 +288,10 @@ read-only API proves too risky or the live status view is deferred.
   ADR 0003. The panel remains read-only for operation decisions; native host
   permission prompts gate sensitive actions.
 - The earlier badge-restoration failure is superseded by the smoke result below.
-  The matching-audit denied-activation state is implemented in panel source,
-  but not verified live. Timeout/unavailable UI remains unverified.
+  The matching-audit denied-activation and timeout/recheck states have
+  owner-reported NAS smoke evidence. The test-only HTTP 503 unavailable-service
+  UI also passed in the owner-reported NAS smoke. Grant-denied and
+  service-start-failure states remain unverified.
 - OpenChamber's service contract does not promise immediate process shutdown
   when the panel closes; the accepted fallback is its ten-minute idle stop.
 
@@ -313,3 +319,26 @@ read-only API proves too risky or the live status view is deferred.
   visible in this probe. Timeout and unavailable-service UI remain unverified.
 - The earlier report that badge restoration was missing is superseded by this
   smoke result.
+
+## Timeout and denied-activation smoke (2026-11-26)
+
+- Owner-reported NAS result: after approximately ten minutes, the panel showed
+  `Status unavailable` and `Check again` for `nas-activation-smoke`. The
+  supplied screenshot shows no token, local path, or stack trace.
+- The owner reports that after denying the pending native activation
+  permission and clicking `Check again`, the panel reported activation denied.
+- Host versions were not reconfirmed for this run. This verifies the
+  timeout/recheck path only; see the following section for the separate
+  unavailable-service smoke.
+
+## Unavailable-service probe smoke (2026-11-26)
+
+- Owner-provided NAS screenshot from the separate `Orchestra Service Probe`
+  panel shows: “The team status could not be verified. The Orchestra service is
+  unavailable or unauthorized.”
+- The same screenshot shows the audit-history unavailable fallback and no
+  token, local path, or stack trace. No team was created for this check.
+- The test service passed `/health` and returned HTTP 503 for application
+  requests. This verifies the panel's HTTP 503 handling only, not a denied
+  service grant or a service process that fails to start. Host versions were
+  not reconfirmed.

@@ -7,9 +7,9 @@ through Git and ZIP archives; versions are Git tags, not npm releases.
 
 ## [Unreleased]
 
-## [0.0.1] - unreleased
+## [0.0.1] - 2026-11-26
 
-First public release. The date is set when the release tag is created.
+First release of the Orchestra OpenChamber extension.
 
 ### Added
 
